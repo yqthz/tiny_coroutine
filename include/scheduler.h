@@ -54,7 +54,10 @@ public:
   }
 
   ~Scheduler() {
-    stop_flag_ = true;
+    {
+      std::lock_guard<std::mutex> lock(mtx);
+      stop_flag_ = true;
+    }
     cv.notify_all();
     for (size_t i = 0; i < threads_.size(); i++) {
       threads_[i].join();

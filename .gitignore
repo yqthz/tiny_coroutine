@@ -1,2 +1,6 @@
 .clangd
 CLAUDE.md
+process.txt
+
+build/
+build_debug/

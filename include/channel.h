@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <coroutine>
-#include <iostream>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
@@ -11,120 +10,128 @@ namespace tiny_coroutine {
 
 template <typename T> class Channel {
 public:
-  struct Awaiter {
-    bool is_wait_{false};
+  struct SenderAwaiter;
+  struct ReceiverAwaiter;
+
+  struct SenderAwaiter {
     Channel<T> *channel_{nullptr};
-    bool is_sender_{true};
     T value_;
 
-    Awaiter(bool is_wait, Channel<T> *channel, bool is_sender, T value = T{})
-        : is_wait_(is_wait), channel_(channel), is_sender_(is_sender),
-          value_(value) {}
+    SenderAwaiter(Channel<T> *channel, T value)
+        : channel_(channel), value_(std::move(value)) {}
 
-    bool await_ready() noexcept { return !is_wait_; }
+    bool await_ready() noexcept { return false; }
 
     template <typename U>
     std::coroutine_handle<>
     await_suspend(std::coroutine_handle<U> handle) noexcept {
-      std::lock_guard<std::mutex> lock(channel_->mtx);
-      if (is_sender_) {
-        channel_->sender_wait_queue_.push(handle);
-        if (!channel_->receiver_wait_queue_.empty()) {
-          auto receiver_handle = channel_->receiver_wait_queue_.front();
-          channel_->receiver_wait_queue_.pop();
-          return receiver_handle;
-        }
-      } else {
-        channel_->receiver_wait_queue_.push(handle);
-        if (!channel_->sender_wait_queue_.empty()) {
-          auto sender_handle = channel_->sender_wait_queue_.front();
-          channel_->sender_wait_queue_.pop();
-          return sender_handle;
-        }
+      std::lock_guard<std::mutex> lock(channel_->mtx_);
+
+      // 有等待的 receiver，直接转移数据，唤醒它
+      if (!channel_->receiver_queue_.empty()) {
+        auto [receiver_handle, receiver_awaiter] =
+            channel_->receiver_queue_.front();
+        channel_->receiver_queue_.pop();
+        receiver_awaiter->value_ = std::move(value_);
+        return receiver_handle;
       }
+
+      // buffer 未满，写入 buffer，不挂起
+      if (!channel_->isFull()) {
+        channel_->buffer_[channel_->tail_] = std::move(value_);
+        channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
+        return handle;
+      }
+
+      // buffer 满，挂起 sender
+      channel_->sender_queue_.push({handle, this});
       return std::noop_coroutine();
     }
 
-    T await_resume() noexcept {
-      if (is_wait_) {
-        std::lock_guard<std::mutex> lock(channel_->mtx);
-        if (is_sender_) {
-          if (!channel_->isFull()) {
-            channel_->buffer_[channel_->tail_] = value_;
-            channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
-          }
-        } else {
-          if (!channel_->isEmpty()) {
-            value_ = channel_->buffer_[channel_->header_];
-            channel_->header_ = (channel_->header_ + 1) % channel_->capacity_;
-          }
+    void await_resume() noexcept {}
+  };
+
+  struct ReceiverAwaiter {
+    Channel<T> *channel_{nullptr};
+    T value_{};
+
+    explicit ReceiverAwaiter(Channel<T> *channel) : channel_(channel) {}
+
+    bool await_ready() noexcept { return false; }
+
+    template <typename U>
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<U> handle) noexcept {
+      std::lock_guard<std::mutex> lock(channel_->mtx_);
+
+      // buffer 有数据，直接读取
+      if (!channel_->isEmpty()) {
+        value_ = std::move(channel_->buffer_[channel_->header_]);
+        channel_->header_ = (channel_->header_ + 1) % channel_->capacity_;
+
+        // 唤醒一个等待的 sender，让它写入 buffer
+        if (!channel_->sender_queue_.empty()) {
+          auto [sender_handle, sender_awaiter] =
+              channel_->sender_queue_.front();
+          channel_->sender_queue_.pop();
+          channel_->buffer_[channel_->tail_] =
+              std::move(sender_awaiter->value_);
+          channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
+          return sender_handle;
         }
+
+        return handle;
       }
-      return value_;
+
+      // buffer 空，有等待的 sender，直接取数据
+      if (!channel_->sender_queue_.empty()) {
+        auto [sender_handle, sender_awaiter] = channel_->sender_queue_.front();
+        channel_->sender_queue_.pop();
+        value_ = std::move(sender_awaiter->value_);
+        return sender_handle;
+      }
+
+      // 无数据，挂起 receiver
+      channel_->receiver_queue_.push({handle, this});
+      return std::noop_coroutine();
     }
+
+    T await_resume() noexcept { return std::move(value_); }
   };
 
   Channel() = default;
-  explicit Channel(int capacity) : header_(0), tail_(0), capacity_(capacity) {
+  explicit Channel(size_t capacity) : capacity_(capacity) {
     buffer_.resize(capacity);
   }
 
   ~Channel() = default;
 
   bool isEmpty() noexcept { return header_ == tail_; }
-
   bool isFull() noexcept { return (tail_ + 1) % capacity_ == header_; }
 
-  Awaiter send(T value) {
+  SenderAwaiter send(T value) {
+    std::lock_guard<std::mutex> lock(mtx_);
     if (close_) {
-      throw std::runtime_error("channel is close");
+      throw std::runtime_error("channel is closed");
     }
-    std::unique_lock<std::mutex> lock(mtx);
-    if (!isFull()) {
-      buffer_[tail_] = value;
-      tail_ = (tail_ + 1) % capacity_;
-      if (!receiver_wait_queue_.empty()) {
-        auto receiver_handle = receiver_wait_queue_.front();
-        receiver_wait_queue_.pop();
-        lock.unlock();
-        receiver_handle.resume();
-      }
-      return Awaiter{false, this, true};
-    }
-    std::cout << "buffer is full, sender suspend" << std::endl;
-    return Awaiter{true, this, true, value};
+    return SenderAwaiter{this, std::move(value)};
   }
 
-  Awaiter receive() noexcept {
-    std::unique_lock<std::mutex> lock(mtx);
-    if (isEmpty()) {
-      std::cout << "buffer is empty, receiver suspend" << std::endl;
-      return Awaiter{true, this, false};
-    }
-    auto value = buffer_[header_];
-    header_ = (header_ + 1) % capacity_;
-    if (!sender_wait_queue_.empty()) {
-      auto sender_handle = sender_wait_queue_.front();
-      sender_wait_queue_.pop();
-      lock.unlock();
-      sender_handle.resume();
-    }
-    return Awaiter{false, this, false, value};
-  }
+  ReceiverAwaiter receive() noexcept { return ReceiverAwaiter{this}; }
 
   void close() {
-    std::unique_lock<std::mutex> lock(mtx);
+    std::unique_lock<std::mutex> lock(mtx_);
     if (close_) {
-      throw std::runtime_error("channel is close");
-    }
-
-    std::vector<std::coroutine_handle<>> handles;
-    while (!receiver_wait_queue_.empty()) {
-      auto handle = receiver_wait_queue_.front();
-      receiver_wait_queue_.pop();
-      handles.push_back(handle);
+      throw std::runtime_error("channel is already closed");
     }
     close_ = true;
+
+    // 唤醒所有等待的 receiver
+    std::vector<std::coroutine_handle<>> handles;
+    while (!receiver_queue_.empty()) {
+      handles.push_back(receiver_queue_.front().first);
+      receiver_queue_.pop();
+    }
     lock.unlock();
 
     for (auto handle : handles) {
@@ -137,9 +144,11 @@ private:
   size_t header_{0};
   size_t tail_{0};
   size_t capacity_{0};
-  std::queue<std::coroutine_handle<>> sender_wait_queue_;
-  std::queue<std::coroutine_handle<>> receiver_wait_queue_;
-  std::atomic<bool> close_{false};
-  std::mutex mtx;
+  bool close_{false};
+  std::mutex mtx_;
+  std::queue<std::pair<std::coroutine_handle<>, SenderAwaiter *>> sender_queue_;
+  std::queue<std::pair<std::coroutine_handle<>, ReceiverAwaiter *>>
+      receiver_queue_;
 };
+
 } // namespace tiny_coroutine

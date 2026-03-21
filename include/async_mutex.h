@@ -79,7 +79,7 @@ public:
   }
 
 private:
-  std::atomic<bool> lock_{false};
+  bool lock_{false};
   std::mutex mtx;
   std::queue<std::coroutine_handle<>> wait_queue_;
 };
