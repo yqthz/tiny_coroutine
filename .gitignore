@@ -4,3 +4,6 @@ process.txt
 
 build/
 build_debug/
+
+.vscode/
+.cache/

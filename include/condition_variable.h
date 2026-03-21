@@ -28,7 +28,7 @@ public:
   };
 
   template <typename Callable>
-  Task<void> wait(AsyncMutex &mtx, Callable op) noexcept {
+  [[nodiscard]] Task<void> wait(AsyncMutex &mtx, Callable op) noexcept {
     while (!op()) {
       mtx.unlock();
       co_await Awaiter{this};
