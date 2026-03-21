@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <coroutine>
 #include <cstdlib>
 #include <exception>
