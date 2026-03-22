@@ -21,7 +21,7 @@ struct AsyncIoBase {
 
   bool await_ready();
 
-  size_t await_resume();
+  int32_t await_resume();
 
   void set_result(int32_t result);
 };

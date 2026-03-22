@@ -47,7 +47,10 @@ public:
                    AsyncRead *async_read) {
     uring_.submit_read(fd, buf, len, offset,
                        reinterpret_cast<uint64_t>(async_read));
-    uring_.submit();
+    int ret = uring_.submit();
+    if (ret < 0) {
+      throw std::runtime_error("io_uring_submit failed");
+    }
     io_count_++;
   }
 
@@ -55,7 +58,10 @@ public:
                     AsyncWrite *async_write) {
     uring_.submit_write(fd, buf, len, offset,
                         reinterpret_cast<uint64_t>(async_write));
-    uring_.submit();
+    int ret = uring_.submit();
+    if (ret < 0) {
+      throw std::runtime_error("io_uring_submit failed");
+    }
     io_count_++;
   }
 

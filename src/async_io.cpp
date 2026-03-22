@@ -8,7 +8,7 @@ AsyncIoBase::AsyncIoBase(IoContext &ctx, int fd, size_t len, size_t offset)
 
 bool AsyncIoBase::await_ready() { return false; }
 
-size_t AsyncIoBase::await_resume() { return result_; }
+int32_t AsyncIoBase::await_resume() { return result_; }
 
 void AsyncIoBase::set_result(int32_t result) { result_ = result; }
 

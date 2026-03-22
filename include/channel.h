@@ -3,6 +3,7 @@
 #include <atomic>
 #include <coroutine>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <stdexcept>
 
@@ -13,9 +14,18 @@ public:
   struct SenderAwaiter;
   struct ReceiverAwaiter;
 
+  // Close semantics contract:
+  // 1) If close() is called while senders are blocked, all blocked senders are
+  //    resumed and their co_await send(...) fails with "channel is closed".
+  // 2) receive() after close behaves as: drain buffered values first; once the
+  //    buffer is empty, co_await receive() fails with "channel is closed".
+  // 3) New receiver after close must not block forever; it is resumed
+  //    immediately and fails with "channel is closed" when no buffered value
+  //    remains.
   struct SenderAwaiter {
     Channel<T> *channel_{nullptr};
     T value_;
+    bool close_{false};
 
     SenderAwaiter(Channel<T> *channel, T value)
         : channel_(channel), value_(std::move(value)) {}
@@ -23,9 +33,13 @@ public:
     bool await_ready() noexcept { return false; }
 
     template <typename U>
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<U> handle) noexcept {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> handle) {
       std::lock_guard<std::mutex> lock(channel_->mtx_);
+
+      if (channel_->close_) {
+        close_ = true;
+        return handle;
+      }
 
       // 有等待的 receiver，直接转移数据，唤醒它
       if (!channel_->receiver_queue_.empty()) {
@@ -49,12 +63,16 @@ public:
       return std::noop_coroutine();
     }
 
-    void await_resume() noexcept {}
+    void await_resume() {
+      if (close_) {
+        throw std::runtime_error("channel is closed");
+      }
+    }
   };
 
   struct ReceiverAwaiter {
     Channel<T> *channel_{nullptr};
-    T value_{};
+    std::optional<T> value_;
 
     explicit ReceiverAwaiter(Channel<T> *channel) : channel_(channel) {}
 
@@ -86,6 +104,11 @@ public:
         return handle;
       }
 
+      if (channel_->close_) {
+        value_ = std::nullopt;
+        return handle;
+      }
+
       // buffer 空，有等待的 sender，直接取数据
       if (!channel_->sender_queue_.empty()) {
         auto [sender_handle, sender_awaiter] = channel_->sender_queue_.front();
@@ -99,7 +122,12 @@ public:
       return std::noop_coroutine();
     }
 
-    T await_resume() noexcept { return std::move(value_); }
+    T await_resume() {
+      if (value_) {
+        return std::move(*value_);
+      }
+      throw std::runtime_error("channel is closed");
+    }
   };
 
   Channel() = default;
@@ -112,6 +140,7 @@ public:
   bool isEmpty() noexcept { return count_ == 0; }
   bool isFull() noexcept { return count_ == capacity_; }
 
+  // Fast-fail for sends after close; await_suspend() rechecks under lock.
   SenderAwaiter send(T value) {
     std::lock_guard<std::mutex> lock(mtx_);
     if (close_) {
@@ -120,8 +149,10 @@ public:
     return SenderAwaiter{this, std::move(value)};
   }
 
+  // Receive either returns a buffered value or throws "channel is closed".
   ReceiverAwaiter receive() noexcept { return ReceiverAwaiter{this}; }
 
+  // close() wakes all blocked senders/receivers so none stays parked forever.
   void close() {
     std::unique_lock<std::mutex> lock(mtx_);
     if (close_) {
@@ -129,15 +160,26 @@ public:
     }
     close_ = true;
 
-    // 唤醒所有等待的 receiver
-    std::vector<std::coroutine_handle<>> handles;
+    std::vector<std::coroutine_handle<>> sender_handles;
+    std::vector<std::coroutine_handle<>> receiver_handles;
+
+    while (!sender_queue_.empty()) {
+      auto [sender_handle, sender_awaiter] = sender_queue_.front();
+      sender_awaiter->close_ = true;
+      sender_queue_.pop();
+      sender_handles.push_back(sender_handle);
+    }
+
     while (!receiver_queue_.empty()) {
-      handles.push_back(receiver_queue_.front().first);
+      receiver_handles.push_back(receiver_queue_.front().first);
       receiver_queue_.pop();
     }
     lock.unlock();
 
-    for (auto handle : handles) {
+    for (auto handle : sender_handles) {
+      handle.resume();
+    }
+    for (auto handle : receiver_handles) {
       handle.resume();
     }
   }
