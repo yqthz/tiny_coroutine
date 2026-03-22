@@ -40,6 +40,7 @@ public:
       if (!channel_->isFull()) {
         channel_->buffer_[channel_->tail_] = std::move(value_);
         channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
+        channel_->count_++;
         return handle;
       }
 
@@ -68,6 +69,7 @@ public:
       if (!channel_->isEmpty()) {
         value_ = std::move(channel_->buffer_[channel_->header_]);
         channel_->header_ = (channel_->header_ + 1) % channel_->capacity_;
+        channel_->count_--;
 
         // 唤醒一个等待的 sender，让它写入 buffer
         if (!channel_->sender_queue_.empty()) {
@@ -77,6 +79,7 @@ public:
           channel_->buffer_[channel_->tail_] =
               std::move(sender_awaiter->value_);
           channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
+          channel_->count_++;
           return sender_handle;
         }
 
@@ -106,8 +109,8 @@ public:
 
   ~Channel() = default;
 
-  bool isEmpty() noexcept { return header_ == tail_; }
-  bool isFull() noexcept { return (tail_ + 1) % capacity_ == header_; }
+  bool isEmpty() noexcept { return count_ == 0; }
+  bool isFull() noexcept { return count_ == capacity_; }
 
   SenderAwaiter send(T value) {
     std::lock_guard<std::mutex> lock(mtx_);
@@ -144,6 +147,7 @@ private:
   size_t header_{0};
   size_t tail_{0};
   size_t capacity_{0};
+  size_t count_{0};
   bool close_{false};
   std::mutex mtx_;
   std::queue<std::pair<std::coroutine_handle<>, SenderAwaiter *>> sender_queue_;
