@@ -4,6 +4,7 @@
 #include "test_utils.h"
 
 #include <atomic>
+#include <thread>
 
 using namespace tiny_coroutine;
 
@@ -161,7 +162,51 @@ TEST(SchedulerTest, StatsSnapshotTracksBasicWorkload) {
   EXPECT_GE(stats.enqueued, static_cast<std::uint64_t>(kTasks));
   EXPECT_GE(stats.dequeued, static_cast<std::uint64_t>(kTasks));
   EXPECT_GE(stats.resumed, static_cast<std::uint64_t>(kTasks));
-  EXPECT_GE(stats.notify_calls, static_cast<std::uint64_t>(kTasks));
+  EXPECT_LE(stats.notify_calls, stats.enqueued);
   EXPECT_GE(stats.worker_waits, static_cast<std::uint64_t>(1));
   EXPECT_GE(stats.worker_wakeups, static_cast<std::uint64_t>(1));
+}
+
+// worker 忙碌时批量入队，不应为每个任务都触发 notify
+TEST(SchedulerTest, BusyWorkerSuppressesNotifyPerEnqueue) {
+  Scheduler scheduler(1);
+  std::atomic<bool> blocker_started{false};
+  std::atomic<bool> unblock{false};
+  std::atomic<int> done{0};
+
+  auto blocker = [&]() -> Task<void> {
+    blocker_started.store(true, std::memory_order_release);
+    while (unblock.load(std::memory_order_acquire) == false) {
+      std::this_thread::yield();
+    }
+    done.fetch_add(1, std::memory_order_relaxed);
+    co_return;
+  };
+
+  scheduler.spawn(blocker());
+  ASSERT_TRUE(wait_until(
+      [&] { return blocker_started.load(std::memory_order_acquire); },
+      std::chrono::milliseconds(500)));
+
+  scheduler.reset_stats();
+
+  constexpr int kTasks = 1000;
+  auto make_task = [&]() -> Task<void> {
+    done.fetch_add(1, std::memory_order_relaxed);
+    co_return;
+  };
+
+  for (int i = 0; i < kTasks; ++i) {
+    scheduler.spawn(make_task());
+  }
+
+  unblock.store(true, std::memory_order_release);
+
+  ASSERT_TRUE(wait_until(
+      [&] { return done.load(std::memory_order_relaxed) == kTasks + 1; },
+      std::chrono::milliseconds(1500)));
+
+  const auto stats = scheduler.stats_snapshot();
+  EXPECT_GE(stats.enqueued, static_cast<std::uint64_t>(kTasks));
+  EXPECT_EQ(stats.notify_calls, 0);
 }

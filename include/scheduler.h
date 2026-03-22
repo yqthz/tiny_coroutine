@@ -53,8 +53,10 @@ public:
           {
             std::unique_lock<std::mutex> lock(mtx);
             stats_worker_waits_.fetch_add(1, std::memory_order_relaxed);
+            ++idle_workers_;
             cv.wait(lock,
                     [this]() { return stop_flag_ || !work_queue_.empty(); });
+            --idle_workers_;
             stats_worker_wakeups_.fetch_add(1, std::memory_order_relaxed);
 
             if (stop_flag_ && work_queue_.empty()) {
@@ -96,25 +98,13 @@ public:
 
   // 提交一个 Task 到调度器
   template <typename T> void spawn(Task<T> &&task) noexcept {
-    {
-      std::lock_guard<std::mutex> lock(mtx);
-      work_queue_.push(task.get_handle());
-      task.detach();
-    }
-    stats_enqueued_.fetch_add(1, std::memory_order_relaxed);
-    stats_notify_calls_.fetch_add(1, std::memory_order_relaxed);
-    cv.notify_one();
+    enqueue_handle(task.get_handle());
+    task.detach();
   }
 
   template <typename T>
   void add_handle(std::coroutine_handle<T> handle) noexcept {
-    {
-      std::lock_guard<std::mutex> lock(mtx);
-      work_queue_.push(handle);
-    }
-    stats_enqueued_.fetch_add(1, std::memory_order_relaxed);
-    stats_notify_calls_.fetch_add(1, std::memory_order_relaxed);
-    cv.notify_one();
+    enqueue_handle(handle);
   }
 
   Awaiter schedule() { return Awaiter(this); }
@@ -140,12 +130,28 @@ public:
   }
 
 private:
+  void enqueue_handle(std::coroutine_handle<> handle) noexcept {
+    bool should_notify = false;
+    {
+      std::lock_guard<std::mutex> lock(mtx);
+      work_queue_.push(handle);
+      should_notify = idle_workers_ > 0;
+    }
+
+    stats_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    if (should_notify) {
+      stats_notify_calls_.fetch_add(1, std::memory_order_relaxed);
+      cv.notify_one();
+    }
+  }
+
   std::mutex mtx;
   std::condition_variable cv;
   std::vector<std::thread> threads_;
   std::queue<std::coroutine_handle<>> work_queue_;
   std::atomic<bool> stop_flag_{false};
   size_t batch_size_{32};
+  size_t idle_workers_{0};
 
   std::atomic<std::uint64_t> stats_enqueued_{0};
   std::atomic<std::uint64_t> stats_dequeued_{0};
