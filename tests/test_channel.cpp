@@ -585,3 +585,148 @@ TEST(ChannelTest, TryReceiveWakesBlockedSenderAndRefillsBuffer) {
   ASSERT_TRUE(second.has_value());
   EXPECT_EQ(*second, 2);
 }
+
+// sender 直连已阻塞 receiver 时，sender 与 receiver 都应继续执行完成
+TEST(ChannelTest, DirectHandoffFromSendResumesBothSides) {
+  Channel<int> ch(1);
+  int received = -1;
+  bool sender_done = false;
+  bool receiver_done = false;
+
+  auto receiver = [&]() -> Task<void> {
+    received = co_await ch.receive();
+    receiver_done = true;
+    co_return;
+  };
+
+  auto sender = [&]() -> Task<void> {
+    co_await ch.send(42);
+    sender_done = true;
+    co_return;
+  };
+
+  auto r = receiver();
+  r.resume();
+  EXPECT_FALSE(r.done());
+
+  auto s = sender();
+  s.resume();
+
+  EXPECT_TRUE(s.done());
+  EXPECT_TRUE(r.done());
+  EXPECT_TRUE(sender_done);
+  EXPECT_TRUE(receiver_done);
+  EXPECT_EQ(received, 42);
+}
+
+// receiver 从 buffer 读取并唤醒阻塞 sender 时，receiver 不应被永久挂起
+TEST(ChannelTest, ReceiveWithBlockedSenderResumesBothSides) {
+  Channel<int> ch(1);
+  int first = -1;
+  bool receiver_done = false;
+  bool sender2_done = false;
+
+  auto seed_sender = [&]() -> Task<void> {
+    co_await ch.send(1);
+    co_return;
+  };
+
+  auto blocked_sender = [&]() -> Task<void> {
+    co_await ch.send(2);
+    sender2_done = true;
+    co_return;
+  };
+
+  auto receiver = [&]() -> Task<void> {
+    first = co_await ch.receive();
+    receiver_done = true;
+    co_return;
+  };
+
+  auto s1 = seed_sender();
+  s1.resume();
+  EXPECT_TRUE(s1.done());
+
+  auto s2 = blocked_sender();
+  s2.resume();
+  EXPECT_FALSE(s2.done());
+
+  auto r = receiver();
+  r.resume();
+
+  EXPECT_TRUE(r.done());
+  EXPECT_TRUE(s2.done());
+  EXPECT_TRUE(receiver_done);
+  EXPECT_TRUE(sender2_done);
+  EXPECT_EQ(first, 1);
+
+  auto second = ch.try_receive();
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(*second, 2);
+}
+
+// try_send_many: 达到容量上限后应停止并返回实际发送数量
+TEST(ChannelTest, TrySendManyStopsAtCapacity) {
+  Channel<int> ch(3);
+  std::vector<int> data{1, 2, 3, 4, 5};
+
+  const size_t sent = ch.try_send_many(data.begin(), data.end());
+  EXPECT_EQ(sent, static_cast<size_t>(3));
+
+  auto values = ch.try_receive_many(8);
+  ASSERT_EQ(values.size(), static_cast<size_t>(3));
+  EXPECT_EQ(values[0], 1);
+  EXPECT_EQ(values[1], 2);
+  EXPECT_EQ(values[2], 3);
+}
+
+// try_receive_many: 按 FIFO 返回当前可读数据
+TEST(ChannelTest, TryReceiveManyReturnsBufferedValuesInOrder) {
+  Channel<int> ch(4);
+  EXPECT_TRUE(ch.try_send(10));
+  EXPECT_TRUE(ch.try_send(20));
+  EXPECT_TRUE(ch.try_send(30));
+
+  auto values = ch.try_receive_many(5);
+  ASSERT_EQ(values.size(), static_cast<size_t>(3));
+  EXPECT_EQ(values[0], 10);
+  EXPECT_EQ(values[1], 20);
+  EXPECT_EQ(values[2], 30);
+}
+
+// try_receive_many: 打开且空时返回空 vector
+TEST(ChannelTest, TryReceiveManyReturnsEmptyWhenOpenAndEmpty) {
+  Channel<int> ch(2);
+  auto values = ch.try_receive_many(4);
+  EXPECT_TRUE(values.empty());
+}
+
+// try_receive_many: 关闭且空时抛异常
+TEST(ChannelTest, TryReceiveManyThrowsWhenClosedAndEmpty) {
+  Channel<int> ch(1);
+  ch.close();
+  EXPECT_THROW((void)ch.try_receive_many(2), std::runtime_error);
+}
+
+// try_send_many 应唤醒已阻塞 receiver，并完成直连交付
+TEST(ChannelTest, TrySendManyWakesBlockedReceivers) {
+  Scheduler scheduler(2);
+  Channel<int> ch(2);
+  std::atomic<int> sum{0};
+
+  auto receiver = [&]() -> Task<void> {
+    int v = co_await ch.receive();
+    sum.fetch_add(v, std::memory_order_relaxed);
+    co_return;
+  };
+
+  scheduler.spawn(receiver());
+  scheduler.spawn(receiver());
+
+  std::vector<int> payload{3, 4};
+  const size_t sent = ch.try_send_many(payload.begin(), payload.end());
+  EXPECT_EQ(sent, static_cast<size_t>(2));
+
+  ASSERT_TRUE(wait_until([&] { return sum.load(std::memory_order_relaxed) == 7; }));
+  EXPECT_EQ(sum.load(std::memory_order_relaxed), 7);
+}

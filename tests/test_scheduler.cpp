@@ -94,3 +94,22 @@ TEST(SchedulerTest, ChainedTasks) {
   EXPECT_TRUE(t.done());
   EXPECT_EQ(t.get(), 42);
 }
+
+// 大量突发任务在单线程下也应全部执行完（覆盖批量出队路径）
+TEST(SchedulerTest, BurstTasksSingleWorker) {
+  Scheduler scheduler(1);
+  constexpr int kTasks = 5000;
+  std::atomic<int> counter{0};
+
+  for (int i = 0; i < kTasks; ++i) {
+    scheduler.spawn([&]() -> Task<void> {
+      counter.fetch_add(1, std::memory_order_relaxed);
+      co_return;
+    }());
+  }
+
+  ASSERT_TRUE(wait_until(
+      [&] { return counter.load(std::memory_order_relaxed) == kTasks; },
+      std::chrono::milliseconds(1000)));
+  EXPECT_EQ(counter.load(std::memory_order_relaxed), kTasks);
+}

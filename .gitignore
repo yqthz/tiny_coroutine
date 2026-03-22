@@ -1,5 +1,6 @@
 .clangd
 CLAUDE.md
+AGENTS.md
 process.txt
 
 build/
@@ -7,3 +8,4 @@ build_debug/
 
 .vscode/
 .cache/
+build_bench/

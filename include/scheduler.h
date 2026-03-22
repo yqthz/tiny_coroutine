@@ -3,14 +3,13 @@
 #include "task.h"
 
 #include <atomic>
-#include <cassert>
 #include <condition_variable>
 #include <coroutine>
 #include <cstddef>
-#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <vector>
 
 namespace tiny_coroutine {
 class Scheduler {
@@ -30,30 +29,37 @@ public:
     void await_resume() noexcept {}
   };
 
-  Scheduler(size_t thread_count = std::thread::hardware_concurrency()) {
+  explicit Scheduler(
+      size_t thread_count = std::thread::hardware_concurrency(),
+      size_t batch_size = 32)
+      : batch_size_(batch_size == 0 ? 1 : batch_size) {
     for (size_t i = 0; i < thread_count; i++) {
       threads_.emplace_back([this]() {
+        std::vector<std::coroutine_handle<>> local_batch;
+        local_batch.reserve(batch_size_);
+
         while (true) {
-          std::coroutine_handle<> handle;
           {
             std::unique_lock<std::mutex> lock(mtx);
             cv.wait(lock,
-                    [this]() { return !work_queue_.empty() || stop_flag_; });
+                    [this]() { return stop_flag_ || !work_queue_.empty(); });
 
-            if (work_queue_.empty()) {
-              if (stop_flag_) {
-                break;
-              }
-              continue;
+            if (stop_flag_ && work_queue_.empty()) {
+              break;
             }
 
-            handle = work_queue_.front();
-            work_queue_.pop();
+            while (!work_queue_.empty() && local_batch.size() < batch_size_) {
+              local_batch.push_back(work_queue_.front());
+              work_queue_.pop();
+            }
           }
 
-          if (handle) {
-            handle.resume();
+          for (auto handle : local_batch) {
+            if (handle) {
+              handle.resume();
+            }
           }
+          local_batch.clear();
         }
       });
     }
@@ -66,22 +72,28 @@ public:
     }
     cv.notify_all();
     for (size_t i = 0; i < threads_.size(); i++) {
-      threads_[i].join();
+      if (threads_[i].joinable()) {
+        threads_[i].join();
+      }
     }
   }
 
   // 提交一个 Task 到调度器
   template <typename T> void spawn(Task<T> &&task) noexcept {
-    std::lock_guard<std::mutex> lock(mtx);
-    work_queue_.push(task.get_handle());
-    task.detach();
+    {
+      std::lock_guard<std::mutex> lock(mtx);
+      work_queue_.push(task.get_handle());
+      task.detach();
+    }
     cv.notify_one();
   }
 
   template <typename T>
   void add_handle(std::coroutine_handle<T> handle) noexcept {
-    std::lock_guard<std::mutex> lock(mtx);
-    work_queue_.push(handle);
+    {
+      std::lock_guard<std::mutex> lock(mtx);
+      work_queue_.push(handle);
+    }
     cv.notify_one();
   }
 
@@ -93,5 +105,6 @@ private:
   std::vector<std::thread> threads_;
   std::queue<std::coroutine_handle<>> work_queue_;
   std::atomic<bool> stop_flag_{false};
+  size_t batch_size_{32};
 };
 } // namespace tiny_coroutine

@@ -38,34 +38,39 @@ public:
     bool await_ready() noexcept { return false; }
 
     template <typename U>
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> handle) {
-      std::lock_guard<std::mutex> lock(channel_->mtx_);
+    bool await_suspend(std::coroutine_handle<U> handle) {
+      std::coroutine_handle<> resume_receiver;
+      bool suspend_sender = false;
 
-      if (channel_->close_) {
-        close_ = true;
-        return handle;
+      {
+        std::lock_guard<std::mutex> lock(channel_->mtx_);
+
+        if (channel_->close_) {
+          close_ = true;
+        } else if (!channel_->receiver_queue_.empty()) {
+          // Direct handoff to a waiting receiver; sender should continue.
+          auto [receiver_handle, receiver_awaiter] =
+              channel_->receiver_queue_.front();
+          channel_->receiver_queue_.pop();
+          receiver_awaiter->value_ = std::move(value_);
+          resume_receiver = receiver_handle;
+        } else if (!channel_->isFull()) {
+          // Buffered send completes immediately.
+          channel_->buffer_[channel_->tail_] = std::move(value_);
+          channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
+          channel_->count_++;
+        } else {
+          // Buffer full: park sender until receiver makes progress.
+          channel_->sender_queue_.push({handle, this});
+          suspend_sender = true;
+        }
       }
 
-      // 有等待的 receiver，直接转移数据，唤醒它
-      if (!channel_->receiver_queue_.empty()) {
-        auto [receiver_handle, receiver_awaiter] =
-            channel_->receiver_queue_.front();
-        channel_->receiver_queue_.pop();
-        receiver_awaiter->value_ = std::move(value_);
-        return receiver_handle;
+      if (resume_receiver) {
+        resume_receiver.resume();
       }
 
-      // buffer 未满，写入 buffer，不挂起
-      if (!channel_->isFull()) {
-        channel_->buffer_[channel_->tail_] = std::move(value_);
-        channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
-        channel_->count_++;
-        return handle;
-      }
-
-      // buffer 满，挂起 sender
-      channel_->sender_queue_.push({handle, this});
-      return std::noop_coroutine();
+      return suspend_sender;
     }
 
     void await_resume() {
@@ -84,48 +89,50 @@ public:
     bool await_ready() noexcept { return false; }
 
     template <typename U>
-    std::coroutine_handle<>
-    await_suspend(std::coroutine_handle<U> handle) noexcept {
-      std::lock_guard<std::mutex> lock(channel_->mtx_);
+    bool await_suspend(std::coroutine_handle<U> handle) noexcept {
+      std::coroutine_handle<> resume_sender;
+      bool suspend_receiver = false;
 
-      // buffer 有数据，直接读取
-      if (!channel_->isEmpty()) {
-        value_ = std::move(*channel_->buffer_[channel_->header_]);
-        channel_->buffer_[channel_->header_].reset();
-        channel_->header_ = (channel_->header_ + 1) % channel_->capacity_;
-        channel_->count_--;
+      {
+        std::lock_guard<std::mutex> lock(channel_->mtx_);
 
-        // 唤醒一个等待的 sender，让它写入 buffer
-        if (!channel_->sender_queue_.empty()) {
-          auto [sender_handle, sender_awaiter] =
-              channel_->sender_queue_.front();
+        // buffer 有数据，直接读取
+        if (!channel_->isEmpty()) {
+          value_ = std::move(*channel_->buffer_[channel_->header_]);
+          channel_->buffer_[channel_->header_].reset();
+          channel_->header_ = (channel_->header_ + 1) % channel_->capacity_;
+          channel_->count_--;
+
+          // 唤醒一个等待的 sender，让它写入 buffer
+          if (!channel_->sender_queue_.empty()) {
+            auto [sender_handle, sender_awaiter] =
+                channel_->sender_queue_.front();
+            channel_->sender_queue_.pop();
+            channel_->buffer_[channel_->tail_] = std::move(sender_awaiter->value_);
+            channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
+            channel_->count_++;
+            resume_sender = sender_handle;
+          }
+        } else if (channel_->close_) {
+          value_ = std::nullopt;
+        } else if (!channel_->sender_queue_.empty()) {
+          // buffer 空，有等待的 sender，直接取数据
+          auto [sender_handle, sender_awaiter] = channel_->sender_queue_.front();
           channel_->sender_queue_.pop();
-          channel_->buffer_[channel_->tail_] =
-              std::move(sender_awaiter->value_);
-          channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
-          channel_->count_++;
-          return sender_handle;
+          value_ = std::move(sender_awaiter->value_);
+          resume_sender = sender_handle;
+        } else {
+          // 无数据，挂起 receiver
+          channel_->receiver_queue_.push({handle, this});
+          suspend_receiver = true;
         }
-
-        return handle;
       }
 
-      if (channel_->close_) {
-        value_ = std::nullopt;
-        return handle;
+      if (resume_sender) {
+        resume_sender.resume();
       }
 
-      // buffer 空，有等待的 sender，直接取数据
-      if (!channel_->sender_queue_.empty()) {
-        auto [sender_handle, sender_awaiter] = channel_->sender_queue_.front();
-        channel_->sender_queue_.pop();
-        value_ = std::move(sender_awaiter->value_);
-        return sender_handle;
-      }
-
-      // 无数据，挂起 receiver
-      channel_->receiver_queue_.push({handle, this});
-      return std::noop_coroutine();
+      return suspend_receiver;
     }
 
     T await_resume() {
@@ -190,6 +197,48 @@ public:
     return true;
   }
 
+
+  // Non-blocking batch send from an iterator range.
+  // Stops when the channel can no longer accept more values immediately.
+  template <typename InputIt>
+  size_t try_send_many(InputIt first, InputIt last) {
+    if (first == last) {
+      return 0;
+    }
+
+    std::vector<std::coroutine_handle<>> resume_receivers;
+    size_t sent = 0;
+
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      if (close_) {
+        throw std::runtime_error("channel is closed");
+      }
+
+      for (; first == last ? false : true; ++first) {
+        auto &&item = *first;
+        if (receiver_queue_.empty() == false) {
+          auto [receiver_handle, receiver_awaiter] = receiver_queue_.front();
+          receiver_queue_.pop();
+          receiver_awaiter->value_.emplace(std::forward<decltype(item)>(item));
+          resume_receivers.push_back(receiver_handle);
+        } else if (isFull() == false) {
+          buffer_[tail_].emplace(std::forward<decltype(item)>(item));
+          tail_ = (tail_ + 1) % capacity_;
+          count_++;
+        } else {
+          break;
+        }
+        sent++;
+      }
+    }
+
+    for (auto handle : resume_receivers) {
+      handle.resume();
+    }
+    return sent;
+  }
+
   // Receive either returns a buffered value or throws "channel is closed".
   ReceiverAwaiter receive() noexcept { return ReceiverAwaiter{this}; }
 
@@ -233,6 +282,58 @@ public:
       resume_sender.resume();
     }
     return value;
+  }
+
+
+  // Non-blocking batch receive.
+  // Returns up to max_items currently available values.
+  // If channel is closed and empty, throws "channel is closed".
+  std::vector<T> try_receive_many(size_t max_items) {
+    std::vector<T> values;
+    if (max_items == 0) {
+      return values;
+    }
+
+    values.reserve(max_items);
+    std::vector<std::coroutine_handle<>> resume_senders;
+
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+
+      for (; values.size() < max_items;) {
+        if (isEmpty() == false) {
+          values.emplace_back(std::move(*buffer_[header_]));
+          buffer_[header_].reset();
+          header_ = (header_ + 1) % capacity_;
+          count_--;
+
+          if (sender_queue_.empty() == false) {
+            auto [sender_handle, sender_awaiter] = sender_queue_.front();
+            sender_queue_.pop();
+            buffer_[tail_] = std::move(sender_awaiter->value_);
+            tail_ = (tail_ + 1) % capacity_;
+            count_++;
+            resume_senders.push_back(sender_handle);
+          }
+        } else if (sender_queue_.empty() == false) {
+          auto [sender_handle, sender_awaiter] = sender_queue_.front();
+          sender_queue_.pop();
+          values.emplace_back(std::move(sender_awaiter->value_));
+          resume_senders.push_back(sender_handle);
+        } else {
+          break;
+        }
+      }
+
+      if (values.empty() && close_) {
+        throw std::runtime_error("channel is closed");
+      }
+    }
+
+    for (auto handle : resume_senders) {
+      handle.resume();
+    }
+    return values;
   }
 
   // close() wakes all blocked senders/receivers so none stays parked forever.
