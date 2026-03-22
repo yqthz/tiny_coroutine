@@ -5,6 +5,8 @@
 #include "when_all.h"
 
 #include <atomic>
+#include <memory>
+#include <stdexcept>
 #include <vector>
 
 using namespace tiny_coroutine;
@@ -31,7 +33,6 @@ TEST(WhenAllTest, VectorTasks) {
 
   ASSERT_TRUE(wait_until([&] { return done.load(); }));
   ASSERT_EQ(results.size(), 5u);
-  // 结果顺序对应输入顺序
   for (int i = 0; i < 5; i++) {
     EXPECT_EQ(results[i], (i + 1) * (i + 1));
   }
@@ -78,5 +79,89 @@ TEST(WhenAllTest, EmptyVector) {
   scheduler.spawn(driver());
 
   ASSERT_TRUE(wait_until([&] { return done.load(); }));
-  EXPECT_TRUE(results.empty());
+  EXPECT_EQ(results.empty(), true);
+}
+
+// 子任务异常时 when_all 不应卡死，应向上传播异常
+TEST(WhenAllTest, VectorTaskExceptionPropagatesWithoutDeadlock) {
+  Scheduler scheduler(4);
+  std::atomic<bool> done{false};
+  std::atomic<bool> got_exception{false};
+
+  auto ok_task = []() -> Task<int> { co_return 1; };
+  auto bad_task = []() -> Task<int> {
+    throw std::runtime_error("boom");
+    co_return 0;
+  };
+
+  auto driver = [&]() -> Task<void> {
+    std::vector<Task<int>> tasks;
+    tasks.push_back(ok_task());
+    tasks.push_back(bad_task());
+    tasks.push_back(ok_task());
+
+    try {
+      auto values = co_await when_all(scheduler, std::move(tasks));
+      (void)values;
+    } catch (const std::runtime_error &) {
+      got_exception.store(true, std::memory_order_release);
+    }
+
+    done.store(true, std::memory_order_release);
+    co_return;
+  };
+
+  scheduler.spawn(driver());
+
+  ASSERT_TRUE(wait_until([&] { return done.load(std::memory_order_acquire); }));
+  EXPECT_EQ(got_exception.load(std::memory_order_acquire), true);
+}
+
+namespace {
+struct MoveOnlyNonDefault {
+  int value;
+
+  MoveOnlyNonDefault() = delete;
+  explicit MoveOnlyNonDefault(int v) : value(v) {}
+  MoveOnlyNonDefault(const MoveOnlyNonDefault &) = delete;
+  MoveOnlyNonDefault &operator=(const MoveOnlyNonDefault &) = delete;
+  MoveOnlyNonDefault(MoveOnlyNonDefault &&other) noexcept : value(other.value) {
+    other.value = -1;
+  }
+  MoveOnlyNonDefault &operator=(MoveOnlyNonDefault &&other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+    value = other.value;
+    other.value = -1;
+    return *this;
+  }
+};
+} // namespace
+
+// variadic when_all 不应要求默认构造
+TEST(WhenAllTest, VariadicSupportsMoveOnlyNonDefaultConstructibleType) {
+  Scheduler scheduler(2);
+  std::atomic<bool> done{false};
+  int payload = 0;
+  int plain = 0;
+
+  auto move_only_task = []() -> Task<MoveOnlyNonDefault> {
+    co_return MoveOnlyNonDefault{42};
+  };
+  auto int_task = []() -> Task<int> { co_return 7; };
+
+  auto driver = [&]() -> Task<void> {
+    auto [m, i] = co_await when_all(scheduler, move_only_task(), int_task());
+    payload = m.value;
+    plain = i;
+    done.store(true, std::memory_order_release);
+    co_return;
+  };
+
+  scheduler.spawn(driver());
+
+  ASSERT_TRUE(wait_until([&] { return done.load(std::memory_order_acquire); }));
+  EXPECT_EQ(payload, 42);
+  EXPECT_EQ(plain, 7);
 }

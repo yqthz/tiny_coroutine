@@ -175,7 +175,12 @@ public:
   };
 
   Channel() = default;
-  explicit Channel(size_t capacity) : capacity_(capacity) { buffer_.resize(capacity); }
+  explicit Channel(size_t capacity) : capacity_(capacity) {
+    if (capacity_ == 0) {
+      throw std::invalid_argument("channel capacity must be greater than 0");
+    }
+    buffer_.resize(capacity_);
+  }
 
   ~Channel() = default;
 

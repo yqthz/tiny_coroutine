@@ -807,3 +807,8 @@ TEST(ChannelTest, StatsSnapshotTracksCloseWakeups) {
   EXPECT_EQ(stats2.close_calls, 1U);
   EXPECT_EQ(stats2.close_wake_receivers, 1U);
 }
+
+// capacity=0 应立即抛异常，避免后续除零错误
+TEST(ChannelTest, ZeroCapacityThrows) {
+  EXPECT_THROW((void)Channel<int>(0), std::invalid_argument);
+}

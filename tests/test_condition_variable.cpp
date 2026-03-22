@@ -21,7 +21,7 @@ TEST(ConditionVariableTest, NotifyOne) {
   auto waiter = [&]() -> Task<void> {
     auto guard = co_await mtx.lock();
     waiter_ready.store(true, std::memory_order_release);
-    co_await cv.wait(mtx, [&] { return flag.load(std::memory_order_acquire); });
+    co_await cv.wait(guard, [&] { return flag.load(std::memory_order_acquire); });
     waiter_done.store(true, std::memory_order_release);
     co_return;
   };
@@ -33,7 +33,7 @@ TEST(ConditionVariableTest, NotifyOne) {
   cv.notify_one();
 
   ASSERT_TRUE(wait_until([&] { return waiter_done.load(std::memory_order_acquire); }));
-  EXPECT_TRUE(waiter_done.load(std::memory_order_acquire));
+  EXPECT_EQ(waiter_done.load(std::memory_order_acquire), true);
 }
 
 // notify_all 唤醒所有等待者
@@ -48,7 +48,7 @@ TEST(ConditionVariableTest, NotifyAll) {
   auto waiter = [&]() -> Task<void> {
     auto guard = co_await mtx.lock();
     ready_count.fetch_add(1, std::memory_order_release);
-    co_await cv.wait(mtx, [&] { return flag.load(std::memory_order_acquire); });
+    co_await cv.wait(guard, [&] { return flag.load(std::memory_order_acquire); });
     done_count.fetch_add(1, std::memory_order_release);
     co_return;
   };
@@ -87,7 +87,7 @@ TEST(ConditionVariableTest, ProducerConsumer) {
   auto consumer = [&]() -> Task<void> {
     auto guard = co_await mtx.lock();
     consumer_ready.store(true, std::memory_order_release);
-    co_await cv.wait(mtx, [&] { return value != 0; });
+    co_await cv.wait(guard, [&] { return value == 123; });
     consumed.store(value, std::memory_order_release);
     co_return;
   };
@@ -98,4 +98,65 @@ TEST(ConditionVariableTest, ProducerConsumer) {
 
   ASSERT_TRUE(wait_until([&] { return consumed.load(std::memory_order_acquire) == 123; }));
   EXPECT_EQ(consumed.load(std::memory_order_acquire), 123);
+}
+
+// wait 返回后仍应持有 mutex，直到 guard 析构
+TEST(ConditionVariableTest, WaitReacquiresLockBeforeReturning) {
+  Scheduler scheduler(3);
+  AsyncMutex mtx;
+  ConditionVariable cv;
+
+  std::atomic<bool> waiter_ready{false};
+  std::atomic<bool> waiter_holding_after_wait{false};
+  std::atomic<bool> release_waiter{false};
+  std::atomic<bool> competitor_acquired{false};
+  int gate = 0;
+
+  auto waiter = [&]() -> Task<void> {
+    auto guard = co_await mtx.lock();
+    waiter_ready.store(true, std::memory_order_release);
+    co_await cv.wait(guard, [&] { return gate == 1; });
+
+    waiter_holding_after_wait.store(true, std::memory_order_release);
+    while (release_waiter.load(std::memory_order_acquire) == false) {
+      co_await scheduler.schedule();
+    }
+    co_return;
+  };
+
+  auto competitor = [&]() -> Task<void> {
+    while (waiter_holding_after_wait.load(std::memory_order_acquire) == false) {
+      co_await scheduler.schedule();
+    }
+    auto guard = co_await mtx.lock();
+    (void)guard;
+    competitor_acquired.store(true, std::memory_order_release);
+    co_return;
+  };
+
+  auto notifier = [&]() -> Task<void> {
+    while (waiter_ready.load(std::memory_order_acquire) == false) {
+      co_await scheduler.schedule();
+    }
+    {
+      auto guard = co_await mtx.lock();
+      gate = 1;
+    }
+    cv.notify_one();
+    co_return;
+  };
+
+  scheduler.spawn(waiter());
+  scheduler.spawn(competitor());
+  scheduler.spawn(notifier());
+
+  ASSERT_TRUE(wait_until([&] {
+    return waiter_holding_after_wait.load(std::memory_order_acquire);
+  }));
+  EXPECT_EQ(competitor_acquired.load(std::memory_order_acquire), false);
+
+  release_waiter.store(true, std::memory_order_release);
+  ASSERT_TRUE(wait_until([&] {
+    return competitor_acquired.load(std::memory_order_acquire);
+  }));
 }
