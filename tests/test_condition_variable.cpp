@@ -3,10 +3,9 @@
 #include "condition_variable.h"
 #include "scheduler.h"
 #include "task.h"
+#include "test_utils.h"
 
 #include <atomic>
-#include <chrono>
-#include <thread>
 
 using namespace tiny_coroutine;
 
@@ -16,23 +15,25 @@ TEST(ConditionVariableTest, NotifyOne) {
   AsyncMutex mtx;
   ConditionVariable cv;
   std::atomic<bool> flag{false};
+  std::atomic<bool> waiter_ready{false};
   std::atomic<bool> waiter_done{false};
 
   auto waiter = [&]() -> Task<void> {
     auto guard = co_await mtx.lock();
-    co_await cv.wait(mtx, [&] { return flag.load(); });
-    waiter_done.store(true);
+    waiter_ready.store(true, std::memory_order_release);
+    co_await cv.wait(mtx, [&] { return flag.load(std::memory_order_acquire); });
+    waiter_done.store(true, std::memory_order_release);
     co_return;
   };
 
   scheduler.spawn(waiter());
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_TRUE(wait_until([&] { return waiter_ready.load(std::memory_order_acquire); }));
 
-  flag.store(true);
+  flag.store(true, std::memory_order_release);
   cv.notify_one();
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  EXPECT_TRUE(waiter_done.load());
+  ASSERT_TRUE(wait_until([&] { return waiter_done.load(std::memory_order_acquire); }));
+  EXPECT_TRUE(waiter_done.load(std::memory_order_acquire));
 }
 
 // notify_all 唤醒所有等待者
@@ -41,25 +42,28 @@ TEST(ConditionVariableTest, NotifyAll) {
   AsyncMutex mtx;
   ConditionVariable cv;
   std::atomic<bool> flag{false};
+  std::atomic<int> ready_count{0};
   std::atomic<int> done_count{0};
 
   auto waiter = [&]() -> Task<void> {
     auto guard = co_await mtx.lock();
-    co_await cv.wait(mtx, [&] { return flag.load(); });
-    done_count.fetch_add(1);
+    ready_count.fetch_add(1, std::memory_order_release);
+    co_await cv.wait(mtx, [&] { return flag.load(std::memory_order_acquire); });
+    done_count.fetch_add(1, std::memory_order_release);
     co_return;
   };
 
   scheduler.spawn(waiter());
   scheduler.spawn(waiter());
   scheduler.spawn(waiter());
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-  flag.store(true);
+  ASSERT_TRUE(wait_until([&] { return ready_count.load(std::memory_order_acquire) == 3; }));
+
+  flag.store(true, std::memory_order_release);
   cv.notify_all();
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  EXPECT_EQ(done_count.load(), 3);
+  ASSERT_TRUE(wait_until([&] { return done_count.load(std::memory_order_acquire) == 3; }));
+  EXPECT_EQ(done_count.load(std::memory_order_acquire), 3);
 }
 
 // 生产者/消费者模式
@@ -68,6 +72,7 @@ TEST(ConditionVariableTest, ProducerConsumer) {
   AsyncMutex mtx;
   ConditionVariable cv;
   int value = 0;
+  std::atomic<bool> consumer_ready{false};
   std::atomic<int> consumed{0};
 
   auto producer = [&](int v) -> Task<void> {
@@ -81,15 +86,16 @@ TEST(ConditionVariableTest, ProducerConsumer) {
 
   auto consumer = [&]() -> Task<void> {
     auto guard = co_await mtx.lock();
+    consumer_ready.store(true, std::memory_order_release);
     co_await cv.wait(mtx, [&] { return value != 0; });
-    consumed.store(value);
+    consumed.store(value, std::memory_order_release);
     co_return;
   };
 
   scheduler.spawn(consumer());
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_TRUE(wait_until([&] { return consumer_ready.load(std::memory_order_acquire); }));
   scheduler.spawn(producer(123));
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  EXPECT_EQ(consumed.load(), 123);
+  ASSERT_TRUE(wait_until([&] { return consumed.load(std::memory_order_acquire) == 123; }));
+  EXPECT_EQ(consumed.load(std::memory_order_acquire), 123);
 }

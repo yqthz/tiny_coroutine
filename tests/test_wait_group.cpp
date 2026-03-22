@@ -1,11 +1,11 @@
 #include <gtest/gtest.h>
 #include "scheduler.h"
 #include "task.h"
+#include "test_utils.h"
 #include "wait_group.h"
 
 #include <atomic>
-#include <chrono>
-#include <thread>
+#include <stdexcept>
 
 using namespace tiny_coroutine;
 
@@ -58,7 +58,7 @@ TEST(WaitGroupTest, WaitForNTasks) {
     scheduler.spawn(worker());
   }
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  ASSERT_TRUE(wait_until([&] { return finished.load() == N && waiter_resumed.load(); }));
   EXPECT_EQ(finished.load(), N);
   EXPECT_TRUE(waiter_resumed.load());
 }
@@ -68,9 +68,11 @@ TEST(WaitGroupTest, MultipleWaiters) {
   Scheduler scheduler(4);
   WaitGroup wg;
   wg.add(1);
+  std::atomic<int> ready{0};
   std::atomic<int> resumed{0};
 
   auto waiter = [&]() -> Task<void> {
+    ready.fetch_add(1);
     co_await wg.wait();
     resumed.fetch_add(1);
     co_return;
@@ -80,8 +82,8 @@ TEST(WaitGroupTest, MultipleWaiters) {
   scheduler.spawn(waiter());
   scheduler.spawn(waiter());
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  ASSERT_TRUE(wait_until([&] { return ready.load() == 3; }));
   wg.done();
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_TRUE(wait_until([&] { return resumed.load() == 3; }));
   EXPECT_EQ(resumed.load(), 3);
 }

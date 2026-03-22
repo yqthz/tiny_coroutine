@@ -44,7 +44,7 @@ template <typename T> struct promise : public base_promise {
     return Task<T>{std::coroutine_handle<promise>::from_promise(*this)};
   }
 
-  template <typename U> void return_value(U &&value) noexcept {
+  template <typename U> void return_value(U &&value) {
     value_ = std::forward<U>(value);
   }
 
@@ -96,13 +96,13 @@ public:
     return true;
   }
 
-  T get() const {
+  T get() {
     assert(handler_ && handler_.done());
     if (handler_.promise().exception_) {
       std::rethrow_exception(handler_.promise().exception_);
     }
     if constexpr (!std::is_void_v<T>) {
-      return *handler_.promise().value_;
+      return std::move(*handler_.promise().value_);
     }
   }
 
@@ -126,7 +126,7 @@ public:
       std::rethrow_exception(handler_.promise().exception_);
     }
     if constexpr (!std::is_void_v<T>) {
-      return *handler_.promise().value_;
+      return std::move(*handler_.promise().value_);
     }
   }
 

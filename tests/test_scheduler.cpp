@@ -1,10 +1,9 @@
 #include <gtest/gtest.h>
 #include "scheduler.h"
 #include "task.h"
+#include "test_utils.h"
 
 #include <atomic>
-#include <chrono>
-#include <thread>
 
 using namespace tiny_coroutine;
 
@@ -22,7 +21,7 @@ TEST(SchedulerTest, SpawnAndRun) {
   scheduler.spawn(task());
   scheduler.spawn(task());
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_TRUE(wait_until([&] { return counter.load() == 3; }));
   EXPECT_EQ(counter.load(), 3);
 }
 
@@ -32,22 +31,38 @@ TEST(SchedulerTest, ScheduleYield) {
   std::atomic<int> steps{0};
 
   auto task = [&]() -> Task<void> {
-    steps.fetch_add(1);           // step 1
+    steps.fetch_add(1); // step 1
     co_await scheduler.schedule();
-    steps.fetch_add(1);           // step 2
+    steps.fetch_add(1); // step 2
     co_return;
   };
 
   scheduler.spawn(task());
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_TRUE(wait_until([&] { return steps.load() == 2; }));
   EXPECT_EQ(steps.load(), 2);
+}
+
+// Scheduler 析构时应先执行完队列中的任务
+TEST(SchedulerTest, DestructorDrainsQueuedTasks) {
+  std::atomic<int> counter{0};
+  constexpr int kTasks = 100;
+
+  {
+    Scheduler scheduler(1);
+    for (int i = 0; i < kTasks; ++i) {
+      scheduler.spawn([&]() -> Task<void> {
+        counter.fetch_add(1, std::memory_order_relaxed);
+        co_return;
+      }());
+    }
+  }
+
+  EXPECT_EQ(counter.load(std::memory_order_relaxed), kTasks);
 }
 
 // Task<T> 能返回值
 TEST(SchedulerTest, TaskReturnValue) {
-  auto compute = []() -> Task<int> {
-    co_return 42;
-  };
+  auto compute = []() -> Task<int> { co_return 42; };
 
   auto t = compute();
   t.resume();
@@ -57,9 +72,7 @@ TEST(SchedulerTest, TaskReturnValue) {
 
 // Task<void> done() 语义
 TEST(SchedulerTest, TaskVoidDone) {
-  auto noop = []() -> Task<void> {
-    co_return;
-  };
+  auto noop = []() -> Task<void> { co_return; };
 
   auto t = noop();
   EXPECT_FALSE(t.done());
@@ -69,9 +82,7 @@ TEST(SchedulerTest, TaskVoidDone) {
 
 // 嵌套 co_await
 TEST(SchedulerTest, ChainedTasks) {
-  auto inner = []() -> Task<int> {
-    co_return 7;
-  };
+  auto inner = []() -> Task<int> { co_return 7; };
 
   auto outer = [&inner]() -> Task<int> {
     int v = co_await inner();

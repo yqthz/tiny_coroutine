@@ -2,6 +2,7 @@
 
 #include "task.h"
 
+#include <atomic>
 #include <cassert>
 #include <condition_variable>
 #include <coroutine>
@@ -38,9 +39,14 @@ public:
             std::unique_lock<std::mutex> lock(mtx);
             cv.wait(lock,
                     [this]() { return !work_queue_.empty() || stop_flag_; });
-            if (stop_flag_) {
-              break;
+
+            if (work_queue_.empty()) {
+              if (stop_flag_) {
+                break;
+              }
+              continue;
             }
+
             handle = work_queue_.front();
             work_queue_.pop();
           }

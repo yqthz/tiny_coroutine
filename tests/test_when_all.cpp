@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 #include "scheduler.h"
 #include "task.h"
+#include "test_utils.h"
 #include "when_all.h"
 
-#include <chrono>
-#include <thread>
+#include <atomic>
 #include <vector>
 
 using namespace tiny_coroutine;
@@ -15,9 +15,7 @@ TEST(WhenAllTest, VectorTasks) {
   std::atomic<bool> done{false};
   std::vector<int> results;
 
-  auto make_task = [](int v) -> Task<int> {
-    co_return v * v;
-  };
+  auto make_task = [](int v) -> Task<int> { co_return v * v; };
 
   auto driver = [&]() -> Task<void> {
     std::vector<Task<int>> tasks;
@@ -30,9 +28,8 @@ TEST(WhenAllTest, VectorTasks) {
   };
 
   scheduler.spawn(driver());
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  ASSERT_TRUE(done.load());
+  ASSERT_TRUE(wait_until([&] { return done.load(); }));
   ASSERT_EQ(results.size(), 5u);
   // 结果顺序对应输入顺序
   for (int i = 0; i < 5; i++) {
@@ -59,9 +56,8 @@ TEST(WhenAllTest, VariadicTasks) {
   };
 
   scheduler.spawn(driver());
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  ASSERT_TRUE(done.load());
+  ASSERT_TRUE(wait_until([&] { return done.load(); }));
   EXPECT_EQ(ri, 7);
   EXPECT_DOUBLE_EQ(rd, 3.14);
 }
@@ -80,8 +76,7 @@ TEST(WhenAllTest, EmptyVector) {
   };
 
   scheduler.spawn(driver());
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  ASSERT_TRUE(done.load());
+  ASSERT_TRUE(wait_until([&] { return done.load(); }));
   EXPECT_TRUE(results.empty());
 }

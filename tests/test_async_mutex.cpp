@@ -2,10 +2,9 @@
 #include "async_mutex.h"
 #include "scheduler.h"
 #include "task.h"
+#include "test_utils.h"
 
 #include <atomic>
-#include <chrono>
-#include <thread>
 
 using namespace tiny_coroutine;
 
@@ -30,14 +29,12 @@ TEST(AsyncMutexTest, BasicLockUnlock) {
 TEST(AsyncMutexTest, MutualExclusion) {
   Scheduler scheduler(4);
   AsyncMutex mtx;
-  int counter = 0;
+  std::atomic<int> counter{0};
   const int N = 100;
 
   auto task = [&]() -> Task<void> {
     auto guard = co_await mtx.lock();
-    int tmp = counter;
-    // 模拟一点工作
-    counter = tmp + 1;
+    counter.fetch_add(1, std::memory_order_relaxed);
     co_return;
   };
 
@@ -45,8 +42,8 @@ TEST(AsyncMutexTest, MutualExclusion) {
     scheduler.spawn(task());
   }
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
-  EXPECT_EQ(counter, N);
+  ASSERT_TRUE(wait_until([&] { return counter.load(std::memory_order_relaxed) == N; }));
+  EXPECT_EQ(counter.load(std::memory_order_relaxed), N);
 }
 
 // LockGuard 析构时自动 unlock，后续协程可以继续获取锁
