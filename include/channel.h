@@ -6,6 +6,9 @@
 #include <optional>
 #include <queue>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace tiny_coroutine {
 
@@ -27,8 +30,10 @@ public:
     T value_;
     bool close_{false};
 
-    SenderAwaiter(Channel<T> *channel, T value)
-        : channel_(channel), value_(std::move(value)) {}
+    template <typename U>
+      requires std::is_constructible_v<T, U &&>
+    SenderAwaiter(Channel<T> *channel, U &&value)
+        : channel_(channel), value_(std::forward<U>(value)) {}
 
     bool await_ready() noexcept { return false; }
 
@@ -85,7 +90,8 @@ public:
 
       // buffer 有数据，直接读取
       if (!channel_->isEmpty()) {
-        value_ = std::move(channel_->buffer_[channel_->header_]);
+        value_ = std::move(*channel_->buffer_[channel_->header_]);
+        channel_->buffer_[channel_->header_].reset();
         channel_->header_ = (channel_->header_ + 1) % channel_->capacity_;
         channel_->count_--;
 
@@ -141,16 +147,93 @@ public:
   bool isFull() noexcept { return count_ == capacity_; }
 
   // Fast-fail for sends after close; await_suspend() rechecks under lock.
-  SenderAwaiter send(T value) {
+  template <typename U>
+    requires std::is_constructible_v<T, U &&>
+  SenderAwaiter send(U &&value) {
     std::lock_guard<std::mutex> lock(mtx_);
     if (close_) {
       throw std::runtime_error("channel is closed");
     }
-    return SenderAwaiter{this, std::move(value)};
+    return SenderAwaiter{this, std::forward<U>(value)};
+  }
+
+  // Non-blocking send; returns false only when buffer is full and no receiver
+  // can take the value immediately.
+  template <typename U>
+    requires std::is_constructible_v<T, U &&>
+  bool try_send(U &&value) {
+    std::coroutine_handle<> resume_receiver;
+
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      if (close_) {
+        throw std::runtime_error("channel is closed");
+      }
+
+      if (!receiver_queue_.empty()) {
+        auto [receiver_handle, receiver_awaiter] = receiver_queue_.front();
+        receiver_queue_.pop();
+        receiver_awaiter->value_.emplace(std::forward<U>(value));
+        resume_receiver = receiver_handle;
+      } else if (!isFull()) {
+        buffer_[tail_].emplace(std::forward<U>(value));
+        tail_ = (tail_ + 1) % capacity_;
+        count_++;
+      } else {
+        return false;
+      }
+    }
+
+    if (resume_receiver) {
+      resume_receiver.resume();
+    }
+    return true;
   }
 
   // Receive either returns a buffered value or throws "channel is closed".
   ReceiverAwaiter receive() noexcept { return ReceiverAwaiter{this}; }
+
+  // Non-blocking receive; returns nullopt when channel is open and empty.
+  // If channel is closed and empty, throws "channel is closed".
+  std::optional<T> try_receive() {
+    std::optional<T> value;
+    std::coroutine_handle<> resume_sender;
+
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+
+      if (!isEmpty()) {
+        value = std::move(*buffer_[header_]);
+        buffer_[header_].reset();
+        header_ = (header_ + 1) % capacity_;
+        count_--;
+
+        if (!sender_queue_.empty()) {
+          auto [sender_handle, sender_awaiter] = sender_queue_.front();
+          sender_queue_.pop();
+          buffer_[tail_] = std::move(sender_awaiter->value_);
+          tail_ = (tail_ + 1) % capacity_;
+          count_++;
+          resume_sender = sender_handle;
+        }
+      } else if (!sender_queue_.empty()) {
+        auto [sender_handle, sender_awaiter] = sender_queue_.front();
+        sender_queue_.pop();
+        value = std::move(sender_awaiter->value_);
+        resume_sender = sender_handle;
+      } else {
+        if (close_) {
+          throw std::runtime_error("channel is closed");
+        }
+        return std::nullopt;
+      }
+    }
+
+    if (resume_sender) {
+      resume_sender.resume();
+    }
+    return value;
+  }
 
   // close() wakes all blocked senders/receivers so none stays parked forever.
   void close() {
@@ -185,7 +268,7 @@ public:
   }
 
 private:
-  std::vector<T> buffer_;
+  std::vector<std::optional<T>> buffer_;
   size_t header_{0};
   size_t tail_{0};
   size_t capacity_{0};
