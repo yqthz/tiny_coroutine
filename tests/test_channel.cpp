@@ -730,3 +730,80 @@ TEST(ChannelTest, TrySendManyWakesBlockedReceivers) {
   ASSERT_TRUE(wait_until([&] { return sum.load(std::memory_order_relaxed) == 7; }));
   EXPECT_EQ(sum.load(std::memory_order_relaxed), 7);
 }
+
+TEST(ChannelTest, StatsSnapshotTracksTryPaths) {
+  Channel<int> ch(1);
+  ch.reset_stats();
+
+  auto empty = ch.try_receive();
+  EXPECT_FALSE(empty.has_value());
+
+  EXPECT_TRUE(ch.try_send(1));
+  EXPECT_FALSE(ch.try_send(2));
+
+  auto v = ch.try_receive();
+  ASSERT_TRUE(v.has_value());
+  EXPECT_EQ(*v, 1);
+
+  ch.close();
+  EXPECT_THROW((void)ch.try_receive(), std::runtime_error);
+
+  const auto stats = ch.stats_snapshot();
+  EXPECT_EQ(stats.buffer_pushes, 1U);
+  EXPECT_EQ(stats.buffer_pops, 1U);
+  EXPECT_EQ(stats.try_send_full_failures, 1U);
+  EXPECT_EQ(stats.try_receive_empty_returns, 1U);
+  EXPECT_EQ(stats.close_calls, 1U);
+  EXPECT_GE(stats.closed_failures, 1U);
+}
+
+TEST(ChannelTest, StatsSnapshotTracksCloseWakeups) {
+  Channel<int> ch(1);
+  ch.reset_stats();
+
+  auto blocked_sender = [&]() -> Task<void> {
+    try {
+      co_await ch.send(2);
+    } catch (const std::runtime_error &) {
+    }
+    co_return;
+  };
+
+  auto seed = [&]() -> Task<void> {
+    co_await ch.send(1);
+    co_return;
+  };
+
+  auto s0 = seed();
+  s0.resume();
+  EXPECT_TRUE(s0.done());
+
+  auto s1 = blocked_sender();
+  s1.resume();
+  EXPECT_FALSE(s1.done());
+
+  Channel<int> ch2(1);
+  ch2.reset_stats();
+  auto r1 = [&]() -> Task<void> {
+    try {
+      (void)co_await ch2.receive();
+    } catch (const std::runtime_error &) {
+    }
+    co_return;
+  }();
+  r1.resume();
+  EXPECT_FALSE(r1.done());
+
+  ch.close();
+  ch2.close();
+
+  EXPECT_TRUE(s1.done());
+  EXPECT_TRUE(r1.done());
+
+  const auto stats1 = ch.stats_snapshot();
+  const auto stats2 = ch2.stats_snapshot();
+  EXPECT_EQ(stats1.close_calls, 1U);
+  EXPECT_EQ(stats1.close_wake_senders, 1U);
+  EXPECT_EQ(stats2.close_calls, 1U);
+  EXPECT_EQ(stats2.close_wake_receivers, 1U);
+}

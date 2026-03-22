@@ -49,11 +49,13 @@ TEST(SchedulerTest, DestructorDrainsQueuedTasks) {
 
   {
     Scheduler scheduler(1);
+    auto make_task = [&counter]() -> Task<void> {
+      counter.fetch_add(1, std::memory_order_relaxed);
+      co_return;
+    };
+
     for (int i = 0; i < kTasks; ++i) {
-      scheduler.spawn([&]() -> Task<void> {
-        counter.fetch_add(1, std::memory_order_relaxed);
-        co_return;
-      }());
+      scheduler.spawn(make_task());
     }
   }
 
@@ -97,19 +99,69 @@ TEST(SchedulerTest, ChainedTasks) {
 
 // 大量突发任务在单线程下也应全部执行完（覆盖批量出队路径）
 TEST(SchedulerTest, BurstTasksSingleWorker) {
-  Scheduler scheduler(1);
   constexpr int kTasks = 5000;
   std::atomic<int> counter{0};
+  Scheduler scheduler(1);
+
+  auto make_task = [&counter]() -> Task<void> {
+    counter.fetch_add(1, std::memory_order_relaxed);
+    co_return;
+  };
 
   for (int i = 0; i < kTasks; ++i) {
-    scheduler.spawn([&]() -> Task<void> {
-      counter.fetch_add(1, std::memory_order_relaxed);
-      co_return;
-    }());
+    scheduler.spawn(make_task());
   }
 
   ASSERT_TRUE(wait_until(
       [&] { return counter.load(std::memory_order_relaxed) == kTasks; },
       std::chrono::milliseconds(1000)));
   EXPECT_EQ(counter.load(std::memory_order_relaxed), kTasks);
+}
+
+// thread_count=0 时应回退到 1 个 worker，避免任务无法执行
+TEST(SchedulerTest, ZeroThreadCountFallsBackToOneWorker) {
+  std::atomic<int> counter{0};
+  Scheduler scheduler(0);
+
+  auto task = [&counter]() -> Task<void> {
+    counter.fetch_add(1, std::memory_order_relaxed);
+    co_return;
+  };
+
+  scheduler.spawn(task());
+
+  ASSERT_TRUE(wait_until(
+      [&] { return counter.load(std::memory_order_relaxed) == 1; },
+      std::chrono::milliseconds(500)));
+  EXPECT_EQ(counter.load(std::memory_order_relaxed), 1);
+}
+
+// 统计接口：基本计数应与任务提交/执行一致
+TEST(SchedulerTest, StatsSnapshotTracksBasicWorkload) {
+  std::atomic<int> done{0};
+  Scheduler scheduler(1);
+
+  scheduler.reset_stats();
+
+  auto make_task = [&done]() -> Task<void> {
+    done.fetch_add(1, std::memory_order_relaxed);
+    co_return;
+  };
+
+  constexpr int kTasks = 8;
+  for (int i = 0; i < kTasks; ++i) {
+    scheduler.spawn(make_task());
+  }
+
+  ASSERT_TRUE(wait_until(
+      [&] { return done.load(std::memory_order_relaxed) == kTasks; },
+      std::chrono::milliseconds(500)));
+
+  const auto stats = scheduler.stats_snapshot();
+  EXPECT_GE(stats.enqueued, static_cast<std::uint64_t>(kTasks));
+  EXPECT_GE(stats.dequeued, static_cast<std::uint64_t>(kTasks));
+  EXPECT_GE(stats.resumed, static_cast<std::uint64_t>(kTasks));
+  EXPECT_GE(stats.notify_calls, static_cast<std::uint64_t>(kTasks));
+  EXPECT_GE(stats.worker_waits, static_cast<std::uint64_t>(1));
+  EXPECT_GE(stats.worker_wakeups, static_cast<std::uint64_t>(1));
 }

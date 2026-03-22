@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <coroutine>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -29,11 +30,21 @@ public:
     void await_resume() noexcept {}
   };
 
+  struct StatsSnapshot {
+    std::uint64_t enqueued{0};
+    std::uint64_t dequeued{0};
+    std::uint64_t resumed{0};
+    std::uint64_t notify_calls{0};
+    std::uint64_t worker_waits{0};
+    std::uint64_t worker_wakeups{0};
+  };
+
   explicit Scheduler(
       size_t thread_count = std::thread::hardware_concurrency(),
       size_t batch_size = 32)
       : batch_size_(batch_size == 0 ? 1 : batch_size) {
-    for (size_t i = 0; i < thread_count; i++) {
+    const size_t worker_count = thread_count == 0 ? 1 : thread_count;
+    for (size_t i = 0; i < worker_count; i++) {
       threads_.emplace_back([this]() {
         std::vector<std::coroutine_handle<>> local_batch;
         local_batch.reserve(batch_size_);
@@ -41,8 +52,10 @@ public:
         while (true) {
           {
             std::unique_lock<std::mutex> lock(mtx);
+            stats_worker_waits_.fetch_add(1, std::memory_order_relaxed);
             cv.wait(lock,
                     [this]() { return stop_flag_ || !work_queue_.empty(); });
+            stats_worker_wakeups_.fetch_add(1, std::memory_order_relaxed);
 
             if (stop_flag_ && work_queue_.empty()) {
               break;
@@ -54,9 +67,12 @@ public:
             }
           }
 
+          stats_dequeued_.fetch_add(static_cast<std::uint64_t>(local_batch.size()),
+                                    std::memory_order_relaxed);
           for (auto handle : local_batch) {
             if (handle) {
               handle.resume();
+              stats_resumed_.fetch_add(1, std::memory_order_relaxed);
             }
           }
           local_batch.clear();
@@ -85,6 +101,8 @@ public:
       work_queue_.push(task.get_handle());
       task.detach();
     }
+    stats_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    stats_notify_calls_.fetch_add(1, std::memory_order_relaxed);
     cv.notify_one();
   }
 
@@ -94,10 +112,32 @@ public:
       std::lock_guard<std::mutex> lock(mtx);
       work_queue_.push(handle);
     }
+    stats_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    stats_notify_calls_.fetch_add(1, std::memory_order_relaxed);
     cv.notify_one();
   }
 
   Awaiter schedule() { return Awaiter(this); }
+
+  StatsSnapshot stats_snapshot() const noexcept {
+    return StatsSnapshot{
+        .enqueued = stats_enqueued_.load(std::memory_order_relaxed),
+        .dequeued = stats_dequeued_.load(std::memory_order_relaxed),
+        .resumed = stats_resumed_.load(std::memory_order_relaxed),
+        .notify_calls = stats_notify_calls_.load(std::memory_order_relaxed),
+        .worker_waits = stats_worker_waits_.load(std::memory_order_relaxed),
+        .worker_wakeups = stats_worker_wakeups_.load(std::memory_order_relaxed),
+    };
+  }
+
+  void reset_stats() noexcept {
+    stats_enqueued_.store(0, std::memory_order_relaxed);
+    stats_dequeued_.store(0, std::memory_order_relaxed);
+    stats_resumed_.store(0, std::memory_order_relaxed);
+    stats_notify_calls_.store(0, std::memory_order_relaxed);
+    stats_worker_waits_.store(0, std::memory_order_relaxed);
+    stats_worker_wakeups_.store(0, std::memory_order_relaxed);
+  }
 
 private:
   std::mutex mtx;
@@ -106,5 +146,12 @@ private:
   std::queue<std::coroutine_handle<>> work_queue_;
   std::atomic<bool> stop_flag_{false};
   size_t batch_size_{32};
+
+  std::atomic<std::uint64_t> stats_enqueued_{0};
+  std::atomic<std::uint64_t> stats_dequeued_{0};
+  std::atomic<std::uint64_t> stats_resumed_{0};
+  std::atomic<std::uint64_t> stats_notify_calls_{0};
+  std::atomic<std::uint64_t> stats_worker_waits_{0};
+  std::atomic<std::uint64_t> stats_worker_wakeups_{0};
 };
 } // namespace tiny_coroutine
