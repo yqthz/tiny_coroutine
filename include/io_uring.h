@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cerrno>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -59,10 +60,22 @@ public:
     return info;
   }
 
-  auto poll() {
+  bool try_wait_one(IoInfo &info) {
     struct io_uring_cqe *cqe;
-    io_uring_peek_cqe(&uring_, &cqe);
-    return cqe != nullptr;
+    const int ret = io_uring_peek_cqe(&uring_, &cqe);
+    if (ret < 0) {
+      if (ret == -EAGAIN) {
+        return false;
+      }
+      throw std::runtime_error("io_uring_peek_cqe failed");
+    }
+    if (cqe == nullptr) {
+      return false;
+    }
+
+    info = IoInfo{.user_data = cqe->user_data, .result = cqe->res};
+    io_uring_cqe_seen(&uring_, cqe);
+    return true;
   }
 
 private:

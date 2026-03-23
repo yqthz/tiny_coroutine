@@ -94,12 +94,21 @@ void setThroughputCounters(benchmark::State &state, int total_ops,
       benchmark::Counter::kIsIterationInvariantRate);
 }
 
+std::string makeBatchLabel(const char *prefix, int submit_batch_size,
+                           int completion_batch_size) {
+  return std::string(prefix) + " submit_batch=" +
+         std::to_string(submit_batch_size) + " completion_batch=" +
+         std::to_string(completion_batch_size);
+}
+
 } // namespace
 
 static void BM_AsyncWriteThroughput(benchmark::State &state) {
   constexpr std::size_t kBlockSize = 4096;
   const int concurrency = static_cast<int>(state.range(0));
   const int ops_per_worker = static_cast<int>(state.range(1));
+  const int submit_batch_size = static_cast<int>(state.range(2));
+  const int completion_batch_size = static_cast<int>(state.range(3));
   const int total_ops = concurrency * ops_per_worker;
   const std::size_t total_bytes =
       static_cast<std::size_t>(total_ops) * kBlockSize;
@@ -108,7 +117,8 @@ static void BM_AsyncWriteThroughput(benchmark::State &state) {
 
   for (auto _ : state) {
     TempFile file(total_bytes);
-    IoContext io_ctx;
+    IoContext io_ctx(256, static_cast<size_t>(submit_batch_size),
+                     static_cast<size_t>(completion_batch_size));
     std::atomic<int> completed{0};
     std::atomic<int> errors{0};
 
@@ -129,19 +139,29 @@ static void BM_AsyncWriteThroughput(benchmark::State &state) {
     }
   }
 
-  state.SetLabel("async_write throughput");
+  state.SetLabel(
+      makeBatchLabel("async_write throughput", submit_batch_size,
+                     completion_batch_size));
   setThroughputCounters(state, total_ops, total_bytes);
 }
 
 BENCHMARK(BM_AsyncWriteThroughput)
-    ->Args({1, 5000})
-    ->Args({4, 5000})
-    ->Args({16, 5000});
+    ->Args({1, 5000, 8, 8})
+    ->Args({1, 5000, 32, 32})
+    ->Args({1, 5000, 64, 64})
+    ->Args({4, 5000, 8, 8})
+    ->Args({4, 5000, 32, 32})
+    ->Args({4, 5000, 64, 64})
+    ->Args({16, 5000, 8, 8})
+    ->Args({16, 5000, 32, 32})
+    ->Args({16, 5000, 64, 64});
 
 static void BM_AsyncReadThroughput(benchmark::State &state) {
   constexpr std::size_t kBlockSize = 4096;
   const int concurrency = static_cast<int>(state.range(0));
   const int ops_per_worker = static_cast<int>(state.range(1));
+  const int submit_batch_size = static_cast<int>(state.range(2));
+  const int completion_batch_size = static_cast<int>(state.range(3));
   const int total_ops = concurrency * ops_per_worker;
   const std::size_t total_bytes =
       static_cast<std::size_t>(total_ops) * kBlockSize;
@@ -151,7 +171,8 @@ static void BM_AsyncReadThroughput(benchmark::State &state) {
 
   for (auto _ : state) {
     TempFile file(total_bytes);
-    IoContext io_ctx;
+    IoContext io_ctx(256, static_cast<size_t>(submit_batch_size),
+                     static_cast<size_t>(completion_batch_size));
     std::atomic<int> completed{0};
     std::atomic<int> errors{0};
 
@@ -172,11 +193,19 @@ static void BM_AsyncReadThroughput(benchmark::State &state) {
     }
   }
 
-  state.SetLabel("async_read throughput");
+  state.SetLabel(
+      makeBatchLabel("async_read throughput", submit_batch_size,
+                     completion_batch_size));
   setThroughputCounters(state, total_ops, total_bytes);
 }
 
 BENCHMARK(BM_AsyncReadThroughput)
-    ->Args({1, 5000})
-    ->Args({4, 5000})
-    ->Args({16, 5000});
+    ->Args({1, 5000, 8, 8})
+    ->Args({1, 5000, 32, 32})
+    ->Args({1, 5000, 64, 64})
+    ->Args({4, 5000, 8, 8})
+    ->Args({4, 5000, 32, 32})
+    ->Args({4, 5000, 64, 64})
+    ->Args({16, 5000, 8, 8})
+    ->Args({16, 5000, 32, 32})
+    ->Args({16, 5000, 64, 64});
