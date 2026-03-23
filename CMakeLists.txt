@@ -1,11 +1,11 @@
-cmake_minimum_required(VERSION 3.15)  
-project(TinyCoroutine                     
-  VERSION 1.0.0                        
-  LANGUAGES CXX)                      
+cmake_minimum_required(VERSION 3.15)
+project(TinyCoroutine
+  VERSION 1.0.0
+  LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)             
-set(CMAKE_CXX_STANDARD_REQUIRED ON)   
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-Wall -Wextra -g -O0)  # Debug 配置
@@ -14,6 +14,9 @@ else()
 endif()
 
 include_directories(include)           # 公共头文件目录
+set(TINY_COROUTINE_CORE_SOURCES
+  src/async_io.cpp
+)
 
 # 查找 liburing
 find_library(URING_LIB uring)
@@ -41,7 +44,10 @@ if(TINY_COROUTINE_TESTS)
   # Add test executables under tests/
   file(GLOB TEST_SOURCES tests/*.cpp)
   if(TEST_SOURCES)
-    add_executable(tiny_coroutine_tests ${TEST_SOURCES})
+    add_executable(tiny_coroutine_tests
+      ${TEST_SOURCES}
+      ${TINY_COROUTINE_CORE_SOURCES}
+    )
     target_link_libraries(tiny_coroutine_tests PRIVATE GTest::gtest_main ${URING_LIB})
     include(GoogleTest)
     gtest_discover_tests(tiny_coroutine_tests)
@@ -66,7 +72,10 @@ if(TINY_COROUTINE_BENCHMARKS)
   # Add benchmark executables under benchmarks/
   file(GLOB BENCH_SOURCES benchmarks/*.cpp)
   if(BENCH_SOURCES)
-    add_executable(tiny_coroutine_benchmarks ${BENCH_SOURCES})
+    add_executable(tiny_coroutine_benchmarks
+      ${BENCH_SOURCES}
+      ${TINY_COROUTINE_CORE_SOURCES}
+    )
     target_link_libraries(tiny_coroutine_benchmarks PRIVATE benchmark::benchmark_main ${URING_LIB})
   endif()
 endif()
