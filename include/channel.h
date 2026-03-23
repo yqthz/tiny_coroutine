@@ -11,6 +11,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef TINY_COROUTINE_ENABLE_STATS
+#define TINY_COROUTINE_ENABLE_STATS 0
+#endif
+
 namespace tiny_coroutine {
 
 template <typename T> class Channel {
@@ -46,14 +50,13 @@ public:
     bool close_{false};
 
     template <typename U>
-      requires std::is_constructible_v<T, U &&>
-    SenderAwaiter(Channel<T> *channel, U &&value)
+    requires std::is_constructible_v<T, U &&> SenderAwaiter(Channel<T> *channel,
+                                                            U &&value)
         : channel_(channel), value_(std::forward<U>(value)) {}
 
     bool await_ready() noexcept { return false; }
 
-    template <typename U>
-    bool await_suspend(std::coroutine_handle<U> handle) {
+    template <typename U> bool await_suspend(std::coroutine_handle<U> handle) {
       std::coroutine_handle<> resume_receiver;
       bool suspend_sender = false;
 
@@ -62,8 +65,7 @@ public:
 
         if (channel_->close_) {
           close_ = true;
-          channel_->stats_closed_failures_.fetch_add(1,
-                                                     std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_closed_failures_, 1);
         } else if (!channel_->receiver_queue_.empty()) {
           // Direct handoff to a waiting receiver; sender should continue.
           auto [receiver_handle, receiver_awaiter] =
@@ -71,20 +73,18 @@ public:
           channel_->receiver_queue_.pop();
           receiver_awaiter->value_ = std::move(value_);
           resume_receiver = receiver_handle;
-          channel_->stats_direct_handoffs_.fetch_add(
-              1, std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_direct_handoffs_, 1);
         } else if (!channel_->isFull()) {
           // Buffered send completes immediately.
           channel_->buffer_[channel_->tail_] = std::move(value_);
           channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
           channel_->count_++;
-          channel_->stats_buffer_pushes_.fetch_add(1,
-                                                   std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_buffer_pushes_, 1);
         } else {
           // Buffer full: park sender until receiver makes progress.
           channel_->sender_queue_.push({handle, this});
           suspend_sender = true;
-          channel_->stats_sender_waits_.fetch_add(1, std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_sender_waits_, 1);
         }
       }
 
@@ -124,38 +124,36 @@ public:
           channel_->buffer_[channel_->header_].reset();
           channel_->header_ = (channel_->header_ + 1) % channel_->capacity_;
           channel_->count_--;
-          channel_->stats_buffer_pops_.fetch_add(1, std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_buffer_pops_, 1);
 
           // 唤醒一个等待的 sender，让它写入 buffer
           if (!channel_->sender_queue_.empty()) {
             auto [sender_handle, sender_awaiter] =
                 channel_->sender_queue_.front();
             channel_->sender_queue_.pop();
-            channel_->buffer_[channel_->tail_] = std::move(sender_awaiter->value_);
+            channel_->buffer_[channel_->tail_] =
+                std::move(sender_awaiter->value_);
             channel_->tail_ = (channel_->tail_ + 1) % channel_->capacity_;
             channel_->count_++;
             resume_sender = sender_handle;
-            channel_->stats_buffer_pushes_.fetch_add(
-                1, std::memory_order_relaxed);
+            channel_->stats_add(channel_->stats_buffer_pushes_, 1);
           }
         } else if (channel_->close_) {
           value_ = std::nullopt;
-          channel_->stats_closed_failures_.fetch_add(1,
-                                                     std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_closed_failures_, 1);
         } else if (!channel_->sender_queue_.empty()) {
           // buffer 空，有等待的 sender，直接取数据
-          auto [sender_handle, sender_awaiter] = channel_->sender_queue_.front();
+          auto [sender_handle, sender_awaiter] =
+              channel_->sender_queue_.front();
           channel_->sender_queue_.pop();
           value_ = std::move(sender_awaiter->value_);
           resume_sender = sender_handle;
-          channel_->stats_direct_handoffs_.fetch_add(
-              1, std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_direct_handoffs_, 1);
         } else {
           // 无数据，挂起 receiver
           channel_->receiver_queue_.push({handle, this});
           suspend_receiver = true;
-          channel_->stats_receiver_waits_.fetch_add(1,
-                                                    std::memory_order_relaxed);
+          channel_->stats_add(channel_->stats_receiver_waits_, 1);
         }
       }
 
@@ -189,11 +187,10 @@ public:
 
   // Fast-fail for sends after close; await_suspend() rechecks under lock.
   template <typename U>
-    requires std::is_constructible_v<T, U &&>
-  SenderAwaiter send(U &&value) {
+  requires std::is_constructible_v<T, U &&> SenderAwaiter send(U &&value) {
     std::lock_guard<std::mutex> lock(mtx_);
     if (close_) {
-      stats_closed_failures_.fetch_add(1, std::memory_order_relaxed);
+      stats_add(stats_closed_failures_, 1);
       throw std::runtime_error("channel is closed");
     }
     return SenderAwaiter{this, std::forward<U>(value)};
@@ -202,14 +199,14 @@ public:
   // Non-blocking send; returns false only when buffer is full and no receiver
   // can take the value immediately.
   template <typename U>
-    requires std::is_constructible_v<T, U &&>
+  requires std::is_constructible_v<T, U &&>
   bool try_send(U &&value) {
     std::coroutine_handle<> resume_receiver;
 
     {
       std::lock_guard<std::mutex> lock(mtx_);
       if (close_) {
-        stats_closed_failures_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_closed_failures_, 1);
         throw std::runtime_error("channel is closed");
       }
 
@@ -218,14 +215,14 @@ public:
         receiver_queue_.pop();
         receiver_awaiter->value_.emplace(std::forward<U>(value));
         resume_receiver = receiver_handle;
-        stats_direct_handoffs_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_direct_handoffs_, 1);
       } else if (!isFull()) {
         buffer_[tail_].emplace(std::forward<U>(value));
         tail_ = (tail_ + 1) % capacity_;
         count_++;
-        stats_buffer_pushes_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_buffer_pushes_, 1);
       } else {
-        stats_try_send_full_failures_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_try_send_full_failures_, 1);
         return false;
       }
     }
@@ -250,7 +247,7 @@ public:
     {
       std::lock_guard<std::mutex> lock(mtx_);
       if (close_) {
-        stats_closed_failures_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_closed_failures_, 1);
         throw std::runtime_error("channel is closed");
       }
 
@@ -263,14 +260,14 @@ public:
           receiver_queue_.pop();
           receiver_awaiter->value_.emplace(std::forward<decltype(item)>(item));
           resume_receivers.push_back(receiver_handle);
-          stats_direct_handoffs_.fetch_add(1, std::memory_order_relaxed);
+          stats_add(stats_direct_handoffs_, 1);
         } else if (isFull() == false) {
           buffer_[tail_].emplace(std::forward<decltype(item)>(item));
           tail_ = (tail_ + 1) % capacity_;
           count_++;
-          stats_buffer_pushes_.fetch_add(1, std::memory_order_relaxed);
+          stats_add(stats_buffer_pushes_, 1);
         } else {
-          stats_try_send_full_failures_.fetch_add(1, std::memory_order_relaxed);
+          stats_add(stats_try_send_full_failures_, 1);
           break;
         }
         sent++;
@@ -300,7 +297,7 @@ public:
         buffer_[header_].reset();
         header_ = (header_ + 1) % capacity_;
         count_--;
-        stats_buffer_pops_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_buffer_pops_, 1);
 
         if (!sender_queue_.empty()) {
           auto [sender_handle, sender_awaiter] = sender_queue_.front();
@@ -309,20 +306,20 @@ public:
           tail_ = (tail_ + 1) % capacity_;
           count_++;
           resume_sender = sender_handle;
-          stats_buffer_pushes_.fetch_add(1, std::memory_order_relaxed);
+          stats_add(stats_buffer_pushes_, 1);
         }
       } else if (!sender_queue_.empty()) {
         auto [sender_handle, sender_awaiter] = sender_queue_.front();
         sender_queue_.pop();
         value = std::move(sender_awaiter->value_);
         resume_sender = sender_handle;
-        stats_direct_handoffs_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_direct_handoffs_, 1);
       } else {
         if (close_) {
-          stats_closed_failures_.fetch_add(1, std::memory_order_relaxed);
+          stats_add(stats_closed_failures_, 1);
           throw std::runtime_error("channel is closed");
         }
-        stats_try_receive_empty_returns_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_try_receive_empty_returns_, 1);
         return std::nullopt;
       }
     }
@@ -358,7 +355,7 @@ public:
           buffer_[header_].reset();
           header_ = (header_ + 1) % capacity_;
           count_--;
-          stats_buffer_pops_.fetch_add(1, std::memory_order_relaxed);
+          stats_add(stats_buffer_pops_, 1);
 
           if (sender_queue_.empty() == false) {
             auto [sender_handle, sender_awaiter] = sender_queue_.front();
@@ -367,14 +364,14 @@ public:
             tail_ = (tail_ + 1) % capacity_;
             count_++;
             resume_senders.push_back(sender_handle);
-            stats_buffer_pushes_.fetch_add(1, std::memory_order_relaxed);
+            stats_add(stats_buffer_pushes_, 1);
           }
         } else if (sender_queue_.empty() == false) {
           auto [sender_handle, sender_awaiter] = sender_queue_.front();
           sender_queue_.pop();
           values.emplace_back(std::move(sender_awaiter->value_));
           resume_senders.push_back(sender_handle);
-          stats_direct_handoffs_.fetch_add(1, std::memory_order_relaxed);
+          stats_add(stats_direct_handoffs_, 1);
         } else {
           break;
         }
@@ -382,9 +379,9 @@ public:
 
       if (values.empty() && close_) {
         closed_and_empty = true;
-        stats_closed_failures_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_closed_failures_, 1);
       } else if (values.empty()) {
-        stats_try_receive_empty_returns_.fetch_add(1, std::memory_order_relaxed);
+        stats_add(stats_try_receive_empty_returns_, 1);
       }
     }
 
@@ -405,7 +402,7 @@ public:
       throw std::runtime_error("channel is already closed");
     }
     close_ = true;
-    stats_close_calls_.fetch_add(1, std::memory_order_relaxed);
+    stats_add(stats_close_calls_, 1);
 
     std::vector<std::coroutine_handle<>> sender_handles;
     std::vector<std::coroutine_handle<>> receiver_handles;
@@ -423,12 +420,10 @@ public:
       receiver_handles.push_back(receiver_queue_.front().first);
       receiver_queue_.pop();
     }
-    stats_close_wake_senders_.fetch_add(
-        static_cast<std::uint64_t>(sender_handles.size()),
-        std::memory_order_relaxed);
-    stats_close_wake_receivers_.fetch_add(
-        static_cast<std::uint64_t>(receiver_handles.size()),
-        std::memory_order_relaxed);
+    stats_add(stats_close_wake_senders_,
+              static_cast<std::uint64_t>(sender_handles.size()));
+    stats_add(stats_close_wake_receivers_,
+              static_cast<std::uint64_t>(receiver_handles.size()));
     lock.unlock();
 
     for (auto handle : sender_handles) {
@@ -441,40 +436,68 @@ public:
 
   StatsSnapshot stats_snapshot() const noexcept {
     return StatsSnapshot{
-        .buffer_pushes = stats_buffer_pushes_.load(std::memory_order_relaxed),
-        .buffer_pops = stats_buffer_pops_.load(std::memory_order_relaxed),
-        .direct_handoffs =
-            stats_direct_handoffs_.load(std::memory_order_relaxed),
-        .sender_waits = stats_sender_waits_.load(std::memory_order_relaxed),
-        .receiver_waits = stats_receiver_waits_.load(std::memory_order_relaxed),
-        .try_send_full_failures =
-            stats_try_send_full_failures_.load(std::memory_order_relaxed),
+        .buffer_pushes = stats_load(stats_buffer_pushes_),
+        .buffer_pops = stats_load(stats_buffer_pops_),
+        .direct_handoffs = stats_load(stats_direct_handoffs_),
+        .sender_waits = stats_load(stats_sender_waits_),
+        .receiver_waits = stats_load(stats_receiver_waits_),
+        .try_send_full_failures = stats_load(stats_try_send_full_failures_),
         .try_receive_empty_returns =
-            stats_try_receive_empty_returns_.load(std::memory_order_relaxed),
-        .closed_failures = stats_closed_failures_.load(std::memory_order_relaxed),
-        .close_calls = stats_close_calls_.load(std::memory_order_relaxed),
-        .close_wake_senders =
-            stats_close_wake_senders_.load(std::memory_order_relaxed),
-        .close_wake_receivers =
-            stats_close_wake_receivers_.load(std::memory_order_relaxed),
+            stats_load(stats_try_receive_empty_returns_),
+        .closed_failures = stats_load(stats_closed_failures_),
+        .close_calls = stats_load(stats_close_calls_),
+        .close_wake_senders = stats_load(stats_close_wake_senders_),
+        .close_wake_receivers = stats_load(stats_close_wake_receivers_),
     };
   }
 
   void reset_stats() noexcept {
-    stats_buffer_pushes_.store(0, std::memory_order_relaxed);
-    stats_buffer_pops_.store(0, std::memory_order_relaxed);
-    stats_direct_handoffs_.store(0, std::memory_order_relaxed);
-    stats_sender_waits_.store(0, std::memory_order_relaxed);
-    stats_receiver_waits_.store(0, std::memory_order_relaxed);
-    stats_try_send_full_failures_.store(0, std::memory_order_relaxed);
-    stats_try_receive_empty_returns_.store(0, std::memory_order_relaxed);
-    stats_closed_failures_.store(0, std::memory_order_relaxed);
-    stats_close_calls_.store(0, std::memory_order_relaxed);
-    stats_close_wake_senders_.store(0, std::memory_order_relaxed);
-    stats_close_wake_receivers_.store(0, std::memory_order_relaxed);
+    stats_reset(stats_buffer_pushes_);
+    stats_reset(stats_buffer_pops_);
+    stats_reset(stats_direct_handoffs_);
+    stats_reset(stats_sender_waits_);
+    stats_reset(stats_receiver_waits_);
+    stats_reset(stats_try_send_full_failures_);
+    stats_reset(stats_try_receive_empty_returns_);
+    stats_reset(stats_closed_failures_);
+    stats_reset(stats_close_calls_);
+    stats_reset(stats_close_wake_senders_);
+    stats_reset(stats_close_wake_receivers_);
   }
 
 private:
+  static constexpr bool kStatsEnabled = TINY_COROUTINE_ENABLE_STATS != 0;
+  using StatsCounter =
+      std::conditional_t<kStatsEnabled, std::atomic<std::uint64_t>,
+                         std::uint64_t>;
+
+  static inline void stats_add(StatsCounter &counter,
+                               std::uint64_t delta = 1) noexcept {
+#if TINY_COROUTINE_ENABLE_STATS
+    counter.fetch_add(delta, std::memory_order_relaxed);
+#else
+    (void)counter;
+    (void)delta;
+#endif
+  }
+
+  static inline std::uint64_t stats_load(const StatsCounter &counter) noexcept {
+#if TINY_COROUTINE_ENABLE_STATS
+    return counter.load(std::memory_order_relaxed);
+#else
+    (void)counter;
+    return 0;
+#endif
+  }
+
+  static inline void stats_reset(StatsCounter &counter) noexcept {
+#if TINY_COROUTINE_ENABLE_STATS
+    counter.store(0, std::memory_order_relaxed);
+#else
+    (void)counter;
+#endif
+  }
+
   std::vector<std::optional<T>> buffer_;
   size_t header_{0};
   size_t tail_{0};
@@ -486,17 +509,17 @@ private:
   std::queue<std::pair<std::coroutine_handle<>, ReceiverAwaiter *>>
       receiver_queue_;
 
-  std::atomic<std::uint64_t> stats_buffer_pushes_{0};
-  std::atomic<std::uint64_t> stats_buffer_pops_{0};
-  std::atomic<std::uint64_t> stats_direct_handoffs_{0};
-  std::atomic<std::uint64_t> stats_sender_waits_{0};
-  std::atomic<std::uint64_t> stats_receiver_waits_{0};
-  std::atomic<std::uint64_t> stats_try_send_full_failures_{0};
-  std::atomic<std::uint64_t> stats_try_receive_empty_returns_{0};
-  std::atomic<std::uint64_t> stats_closed_failures_{0};
-  std::atomic<std::uint64_t> stats_close_calls_{0};
-  std::atomic<std::uint64_t> stats_close_wake_senders_{0};
-  std::atomic<std::uint64_t> stats_close_wake_receivers_{0};
+  StatsCounter stats_buffer_pushes_{0};
+  StatsCounter stats_buffer_pops_{0};
+  StatsCounter stats_direct_handoffs_{0};
+  StatsCounter stats_sender_waits_{0};
+  StatsCounter stats_receiver_waits_{0};
+  StatsCounter stats_try_send_full_failures_{0};
+  StatsCounter stats_try_receive_empty_returns_{0};
+  StatsCounter stats_closed_failures_{0};
+  StatsCounter stats_close_calls_{0};
+  StatsCounter stats_close_wake_senders_{0};
+  StatsCounter stats_close_wake_receivers_{0};
 };
 
 } // namespace tiny_coroutine

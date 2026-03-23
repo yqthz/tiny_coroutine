@@ -7,6 +7,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(TINY_COROUTINE_ENABLE_STATS "Enable runtime statistics counters" OFF)
+if(TINY_COROUTINE_ENABLE_STATS)
+  add_compile_definitions(TINY_COROUTINE_ENABLE_STATS=1)
+else()
+  add_compile_definitions(TINY_COROUTINE_ENABLE_STATS=0)
+endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-Wall -Wextra -g -O0)  # Debug 配置
 else()

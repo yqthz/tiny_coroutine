@@ -159,12 +159,21 @@ TEST(SchedulerTest, StatsSnapshotTracksBasicWorkload) {
       std::chrono::milliseconds(500)));
 
   const auto stats = scheduler.stats_snapshot();
+#if TINY_COROUTINE_ENABLE_STATS
   EXPECT_GE(stats.enqueued, static_cast<std::uint64_t>(kTasks));
   EXPECT_GE(stats.dequeued, static_cast<std::uint64_t>(kTasks));
   EXPECT_GE(stats.resumed, static_cast<std::uint64_t>(kTasks));
   EXPECT_LE(stats.notify_calls, stats.enqueued);
   EXPECT_GE(stats.worker_waits, static_cast<std::uint64_t>(1));
   EXPECT_GE(stats.worker_wakeups, static_cast<std::uint64_t>(1));
+#else
+  EXPECT_EQ(stats.enqueued, 0U);
+  EXPECT_EQ(stats.dequeued, 0U);
+  EXPECT_EQ(stats.resumed, 0U);
+  EXPECT_EQ(stats.notify_calls, 0U);
+  EXPECT_EQ(stats.worker_waits, 0U);
+  EXPECT_EQ(stats.worker_wakeups, 0U);
+#endif
 }
 
 // worker 忙碌时批量入队，不应为每个任务都触发 notify
@@ -207,6 +216,11 @@ TEST(SchedulerTest, BusyWorkerSuppressesNotifyPerEnqueue) {
       std::chrono::milliseconds(1500)));
 
   const auto stats = scheduler.stats_snapshot();
+#if TINY_COROUTINE_ENABLE_STATS
   EXPECT_GE(stats.enqueued, static_cast<std::uint64_t>(kTasks));
-  EXPECT_EQ(stats.notify_calls, 0);
+  EXPECT_EQ(stats.notify_calls, 0U);
+#else
+  EXPECT_EQ(stats.enqueued, 0U);
+  EXPECT_EQ(stats.notify_calls, 0U);
+#endif
 }

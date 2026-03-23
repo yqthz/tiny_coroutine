@@ -10,7 +10,12 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <type_traits>
 #include <vector>
+
+#ifndef TINY_COROUTINE_ENABLE_STATS
+#define TINY_COROUTINE_ENABLE_STATS 0
+#endif
 
 namespace tiny_coroutine {
 class Scheduler {
@@ -39,9 +44,8 @@ public:
     std::uint64_t worker_wakeups{0};
   };
 
-  explicit Scheduler(
-      size_t thread_count = std::thread::hardware_concurrency(),
-      size_t batch_size = 32)
+  explicit Scheduler(size_t thread_count = std::thread::hardware_concurrency(),
+                     size_t batch_size = 32)
       : batch_size_(batch_size == 0 ? 1 : batch_size) {
     const size_t worker_count = thread_count == 0 ? 1 : thread_count;
     for (size_t i = 0; i < worker_count; i++) {
@@ -52,12 +56,12 @@ public:
         while (true) {
           {
             std::unique_lock<std::mutex> lock(mtx);
-            stats_worker_waits_.fetch_add(1, std::memory_order_relaxed);
+            stats_add(stats_worker_waits_);
             ++idle_workers_;
             cv.wait(lock,
                     [this]() { return stop_flag_ || !work_queue_.empty(); });
             --idle_workers_;
-            stats_worker_wakeups_.fetch_add(1, std::memory_order_relaxed);
+            stats_add(stats_worker_wakeups_);
 
             if (stop_flag_ && work_queue_.empty()) {
               break;
@@ -69,12 +73,12 @@ public:
             }
           }
 
-          stats_dequeued_.fetch_add(static_cast<std::uint64_t>(local_batch.size()),
-                                    std::memory_order_relaxed);
+          stats_add(stats_dequeued_,
+                    static_cast<std::uint64_t>(local_batch.size()));
           for (auto handle : local_batch) {
             if (handle) {
               handle.resume();
-              stats_resumed_.fetch_add(1, std::memory_order_relaxed);
+              stats_add(stats_resumed_);
             }
           }
           local_batch.clear();
@@ -111,25 +115,57 @@ public:
 
   StatsSnapshot stats_snapshot() const noexcept {
     return StatsSnapshot{
-        .enqueued = stats_enqueued_.load(std::memory_order_relaxed),
-        .dequeued = stats_dequeued_.load(std::memory_order_relaxed),
-        .resumed = stats_resumed_.load(std::memory_order_relaxed),
-        .notify_calls = stats_notify_calls_.load(std::memory_order_relaxed),
-        .worker_waits = stats_worker_waits_.load(std::memory_order_relaxed),
-        .worker_wakeups = stats_worker_wakeups_.load(std::memory_order_relaxed),
+        .enqueued = stats_load(stats_enqueued_),
+        .dequeued = stats_load(stats_dequeued_),
+        .resumed = stats_load(stats_resumed_),
+        .notify_calls = stats_load(stats_notify_calls_),
+        .worker_waits = stats_load(stats_worker_waits_),
+        .worker_wakeups = stats_load(stats_worker_wakeups_),
     };
   }
 
   void reset_stats() noexcept {
-    stats_enqueued_.store(0, std::memory_order_relaxed);
-    stats_dequeued_.store(0, std::memory_order_relaxed);
-    stats_resumed_.store(0, std::memory_order_relaxed);
-    stats_notify_calls_.store(0, std::memory_order_relaxed);
-    stats_worker_waits_.store(0, std::memory_order_relaxed);
-    stats_worker_wakeups_.store(0, std::memory_order_relaxed);
+    stats_reset(stats_enqueued_);
+    stats_reset(stats_dequeued_);
+    stats_reset(stats_resumed_);
+    stats_reset(stats_notify_calls_);
+    stats_reset(stats_worker_waits_);
+    stats_reset(stats_worker_wakeups_);
   }
 
 private:
+  static constexpr bool kStatsEnabled = TINY_COROUTINE_ENABLE_STATS != 0;
+  using StatsCounter =
+      std::conditional_t<kStatsEnabled, std::atomic<std::uint64_t>,
+                         std::uint64_t>;
+
+  static inline void stats_add(StatsCounter &counter,
+                               std::uint64_t delta = 1) noexcept {
+#if TINY_COROUTINE_ENABLE_STATS
+    counter.fetch_add(delta, std::memory_order_relaxed);
+#else
+    (void)counter;
+    (void)delta;
+#endif
+  }
+
+  static inline std::uint64_t stats_load(const StatsCounter &counter) noexcept {
+#if TINY_COROUTINE_ENABLE_STATS
+    return counter.load(std::memory_order_relaxed);
+#else
+    (void)counter;
+    return 0;
+#endif
+  }
+
+  static inline void stats_reset(StatsCounter &counter) noexcept {
+#if TINY_COROUTINE_ENABLE_STATS
+    counter.store(0, std::memory_order_relaxed);
+#else
+    (void)counter;
+#endif
+  }
+
   void enqueue_handle(std::coroutine_handle<> handle) noexcept {
     bool should_notify = false;
     {
@@ -138,9 +174,9 @@ private:
       should_notify = idle_workers_ > 0;
     }
 
-    stats_enqueued_.fetch_add(1, std::memory_order_relaxed);
+    stats_add(stats_enqueued_);
     if (should_notify) {
-      stats_notify_calls_.fetch_add(1, std::memory_order_relaxed);
+      stats_add(stats_notify_calls_);
       cv.notify_one();
     }
   }
@@ -153,11 +189,11 @@ private:
   size_t batch_size_{32};
   size_t idle_workers_{0};
 
-  std::atomic<std::uint64_t> stats_enqueued_{0};
-  std::atomic<std::uint64_t> stats_dequeued_{0};
-  std::atomic<std::uint64_t> stats_resumed_{0};
-  std::atomic<std::uint64_t> stats_notify_calls_{0};
-  std::atomic<std::uint64_t> stats_worker_waits_{0};
-  std::atomic<std::uint64_t> stats_worker_wakeups_{0};
+  StatsCounter stats_enqueued_{0};
+  StatsCounter stats_dequeued_{0};
+  StatsCounter stats_resumed_{0};
+  StatsCounter stats_notify_calls_{0};
+  StatsCounter stats_worker_waits_{0};
+  StatsCounter stats_worker_wakeups_{0};
 };
 } // namespace tiny_coroutine

@@ -749,12 +749,21 @@ TEST(ChannelTest, StatsSnapshotTracksTryPaths) {
   EXPECT_THROW((void)ch.try_receive(), std::runtime_error);
 
   const auto stats = ch.stats_snapshot();
+#if TINY_COROUTINE_ENABLE_STATS
   EXPECT_EQ(stats.buffer_pushes, 1U);
   EXPECT_EQ(stats.buffer_pops, 1U);
   EXPECT_EQ(stats.try_send_full_failures, 1U);
   EXPECT_EQ(stats.try_receive_empty_returns, 1U);
   EXPECT_EQ(stats.close_calls, 1U);
   EXPECT_GE(stats.closed_failures, 1U);
+#else
+  EXPECT_EQ(stats.buffer_pushes, 0U);
+  EXPECT_EQ(stats.buffer_pops, 0U);
+  EXPECT_EQ(stats.try_send_full_failures, 0U);
+  EXPECT_EQ(stats.try_receive_empty_returns, 0U);
+  EXPECT_EQ(stats.close_calls, 0U);
+  EXPECT_EQ(stats.closed_failures, 0U);
+#endif
 }
 
 TEST(ChannelTest, StatsSnapshotTracksCloseWakeups) {
@@ -802,10 +811,17 @@ TEST(ChannelTest, StatsSnapshotTracksCloseWakeups) {
 
   const auto stats1 = ch.stats_snapshot();
   const auto stats2 = ch2.stats_snapshot();
+#if TINY_COROUTINE_ENABLE_STATS
   EXPECT_EQ(stats1.close_calls, 1U);
   EXPECT_EQ(stats1.close_wake_senders, 1U);
   EXPECT_EQ(stats2.close_calls, 1U);
   EXPECT_EQ(stats2.close_wake_receivers, 1U);
+#else
+  EXPECT_EQ(stats1.close_calls, 0U);
+  EXPECT_EQ(stats1.close_wake_senders, 0U);
+  EXPECT_EQ(stats2.close_calls, 0U);
+  EXPECT_EQ(stats2.close_wake_receivers, 0U);
+#endif
 }
 
 // capacity=0 应立即抛异常，避免后续除零错误
