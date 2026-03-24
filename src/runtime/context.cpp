@@ -8,7 +8,9 @@ Context::Context(size_t id, Scheduler *owner_scheduler,
                  std::atomic<size_t> *pending_tasks,
                  OnTaskCompleted on_task_completed)
     : id_(id), owner_scheduler_(owner_scheduler), pending_tasks_(pending_tasks),
-      on_task_completed_(std::move(on_task_completed)) {}
+      on_task_completed_(std::move(on_task_completed)) {
+  work_batch_.reserve(kProcessBatchSize);
+}
 
 void Context::start() {
   worker_ = std::jthread([this](std::stop_token token) { run(token); });
@@ -29,8 +31,20 @@ void Context::submit_task(std::coroutine_handle<> handle) {
   engine_.submit_task(handle);
 }
 
+void Context::submit_io_waiting(std::coroutine_handle<> handle) {
+  engine_.submit_io_waiting(handle);
+}
+
+void Context::submit_io_read(IoReadAwaiter *awaiter) {
+  engine_.submit_io_read(awaiter);
+}
+
+void Context::submit_io_write(IoWriteAwaiter *awaiter) {
+  engine_.submit_io_write(awaiter);
+}
+
 void Context::submit_tracked_task(std::coroutine_handle<> handle) {
-  if (!handle) {
+  if (handle == std::coroutine_handle<>()) {
     return;
   }
   pending_tasks_->fetch_add(1, std::memory_order_release);
@@ -52,7 +66,7 @@ void Context::run(std::stop_token token) {
       continue;
     }
 
-    if (token.stop_requested() && engine_.empty()) {
+    if (engine_.can_stop(token)) {
       break;
     }
 
@@ -64,23 +78,27 @@ void Context::run(std::stop_token token) {
 }
 
 bool Context::process_work_once() {
-  auto handle = engine_.try_pop_task();
-  if (!handle) {
+  const auto popped = engine_.pop_batch(work_batch_, kProcessBatchSize);
+  if (popped == 0) {
     return false;
   }
 
-  handle.resume();
-  if (handle.done()) {
-    handle.destroy();
-    on_task_completed_();
+  for (auto handle : work_batch_) {
+    engine_.on_task_resume_begin();
+    handle.resume();
+    engine_.on_task_resume_end();
+
+    if (handle.done()) {
+      handle.destroy();
+      on_task_completed_();
+    }
   }
 
   return true;
 }
 
 bool Context::poll_io_once() {
-  // Placeholder for io_uring submit/completion processing.
-  return false;
+  return engine_.poll_io(kIoPollBatchSize) > 0;
 }
 
 void Context::wait_or_idle(std::stop_token token) {
