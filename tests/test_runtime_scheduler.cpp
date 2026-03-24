@@ -86,3 +86,33 @@ TEST(RuntimeSchedulerTest, SubmitToContextUsesLocalContextPath) {
   const int expected = kParentCount * 3;
   EXPECT_EQ(counter.load(std::memory_order_relaxed), expected);
 }
+
+TEST(RuntimeSchedulerTest, SubmitToSchedulerUsesLocalSchedulerPath) {
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
+
+  std::atomic<int> counter{0};
+
+  auto sub_task = [&]() -> Task<void> {
+    counter.fetch_add(1, std::memory_order_relaxed);
+    co_return;
+  };
+
+  auto parent_task = [&]() -> Task<void> {
+    runtime::submit_to_scheduler(sub_task());
+    runtime::submit_to_scheduler(sub_task());
+    co_await scheduler.schedule();
+    counter.fetch_add(1, std::memory_order_relaxed);
+    co_return;
+  };
+
+  constexpr int kParentCount = 64;
+  for (int i = 0; i < kParentCount; ++i) {
+    scheduler.submit(parent_task());
+  }
+
+  scheduler.loop();
+
+  const int expected = kParentCount * 3;
+  EXPECT_EQ(counter.load(std::memory_order_relaxed), expected);
+}
