@@ -1,5 +1,5 @@
 #include "channel.h"
-#include "scheduler.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 #include "test_utils.h"
 #include <gtest/gtest.h>
@@ -38,7 +38,8 @@ TEST(ChannelTest, BasicSendReceive) {
 
 // buffer 满后 sender 挂起，receiver 消费后 sender 继续
 TEST(ChannelTest, SenderBlocksWhenFull) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
   Channel<int> ch(1);
   std::atomic<bool> sender2_started{false};
   std::atomic<bool> sender2_done{false};
@@ -61,23 +62,26 @@ TEST(ChannelTest, SenderBlocksWhenFull) {
     co_return;
   };
 
-  scheduler.spawn(sender1());
-  scheduler.spawn(sender2());
-
+  scheduler.submit(sender1());
+  scheduler.submit(sender2());
   ASSERT_TRUE(wait_until([&] {
     return sender2_started.load(std::memory_order_acquire);
   }));
-  EXPECT_FALSE(sender2_done.load(std::memory_order_acquire));
+  ASSERT_TRUE(wait_until([&] {
+    return ch.stats_snapshot().sender_waits >= 1;
+  }));
 
-  scheduler.spawn(receiver());
+  scheduler.submit(receiver());
   ASSERT_TRUE(wait_until([&] {
     return sender2_done.load(std::memory_order_acquire);
   }));
+  scheduler.stop();
 }
 
 // receiver 先于 sender 挂起，sender 到来后直接交付
 TEST(ChannelTest, ReceiverBlocksWhenEmpty) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
   Channel<int> ch(1);
   std::atomic<int> received{-1};
   std::atomic<bool> receiver_started{false};
@@ -95,23 +99,25 @@ TEST(ChannelTest, ReceiverBlocksWhenEmpty) {
     co_return;
   };
 
-  scheduler.spawn(receiver());
+  scheduler.submit(receiver());
   ASSERT_TRUE(wait_until([&] {
     return receiver_started.load(std::memory_order_acquire);
   }));
   EXPECT_FALSE(receiver_done.load(std::memory_order_acquire));
 
-  scheduler.spawn(sender());
+  scheduler.submit(sender());
   ASSERT_TRUE(wait_until([&] {
     return receiver_done.load(std::memory_order_acquire);
   }));
 
+  scheduler.stop();
   EXPECT_EQ(received.load(std::memory_order_acquire), 99);
 }
 
 // 多生产者多消费者，所有值都被消费
 TEST(ChannelTest, MPMC) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
   Channel<int> ch(4);
   const int N = 20;
   std::atomic<int> sum{0};
@@ -128,14 +134,15 @@ TEST(ChannelTest, MPMC) {
   };
 
   for (int i = 1; i <= N; i++) {
-    scheduler.spawn(producer(i));
-    scheduler.spawn(consumer());
+    scheduler.submit(producer(i));
+    scheduler.submit(consumer());
   }
 
   // 1+2+...+N = N*(N+1)/2
   ASSERT_TRUE(wait_until([&] {
     return sum.load(std::memory_order_acquire) == N * (N + 1) / 2;
   }, std::chrono::milliseconds(500)));
+  scheduler.stop();
   EXPECT_EQ(sum.load(std::memory_order_acquire), N * (N + 1) / 2);
 }
 
@@ -191,7 +198,8 @@ TEST(ChannelTest, CloseWakesBlockedSenderWithError) {
 
 // close() 后新来的 receiver 不应永久挂起，应立即感知关闭
 TEST(ChannelTest, ReceiveAfterCloseFailsImmediately) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
   Channel<int> ch(1);
   std::atomic<bool> receiver_ok{false};
   std::atomic<bool> receiver_failed{false};
@@ -208,11 +216,12 @@ TEST(ChannelTest, ReceiveAfterCloseFailsImmediately) {
     co_return;
   };
 
-  scheduler.spawn(receiver());
+  scheduler.submit(receiver());
 
   ASSERT_TRUE(wait_until([&] {
     return receiver_failed.load(std::memory_order_acquire);
   }));
+  scheduler.stop();
   EXPECT_FALSE(receiver_ok.load(std::memory_order_acquire));
   EXPECT_TRUE(receiver_failed.load(std::memory_order_acquire));
 }
@@ -710,7 +719,8 @@ TEST(ChannelTest, TryReceiveManyThrowsWhenClosedAndEmpty) {
 
 // try_send_many 应唤醒已阻塞 receiver，并完成直连交付
 TEST(ChannelTest, TrySendManyWakesBlockedReceivers) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
   Channel<int> ch(2);
   std::atomic<int> sum{0};
 
@@ -720,14 +730,15 @@ TEST(ChannelTest, TrySendManyWakesBlockedReceivers) {
     co_return;
   };
 
-  scheduler.spawn(receiver());
-  scheduler.spawn(receiver());
+  scheduler.submit(receiver());
+  scheduler.submit(receiver());
 
   std::vector<int> payload{3, 4};
   const size_t sent = ch.try_send_many(payload.begin(), payload.end());
   EXPECT_EQ(sent, static_cast<size_t>(2));
 
   ASSERT_TRUE(wait_until([&] { return sum.load(std::memory_order_relaxed) == 7; }));
+  scheduler.stop();
   EXPECT_EQ(sum.load(std::memory_order_relaxed), 7);
 }
 

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "async_mutex.h"
 #include "condition_variable.h"
-#include "scheduler.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 #include "test_utils.h"
 
@@ -11,7 +11,9 @@ using namespace tiny_coroutine;
 
 // notify_one 唤醒单个等待者
 TEST(ConditionVariableTest, NotifyOne) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
+
   AsyncMutex mtx;
   ConditionVariable cv;
   std::atomic<bool> flag{false};
@@ -26,19 +28,22 @@ TEST(ConditionVariableTest, NotifyOne) {
     co_return;
   };
 
-  scheduler.spawn(waiter());
+  scheduler.submit(waiter());
   ASSERT_TRUE(wait_until([&] { return waiter_ready.load(std::memory_order_acquire); }));
 
   flag.store(true, std::memory_order_release);
   cv.notify_one();
 
   ASSERT_TRUE(wait_until([&] { return waiter_done.load(std::memory_order_acquire); }));
+  scheduler.stop();
   EXPECT_EQ(waiter_done.load(std::memory_order_acquire), true);
 }
 
 // notify_all 唤醒所有等待者
 TEST(ConditionVariableTest, NotifyAll) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
+
   AsyncMutex mtx;
   ConditionVariable cv;
   std::atomic<bool> flag{false};
@@ -53,9 +58,9 @@ TEST(ConditionVariableTest, NotifyAll) {
     co_return;
   };
 
-  scheduler.spawn(waiter());
-  scheduler.spawn(waiter());
-  scheduler.spawn(waiter());
+  scheduler.submit(waiter());
+  scheduler.submit(waiter());
+  scheduler.submit(waiter());
 
   ASSERT_TRUE(wait_until([&] { return ready_count.load(std::memory_order_acquire) == 3; }));
 
@@ -63,12 +68,15 @@ TEST(ConditionVariableTest, NotifyAll) {
   cv.notify_all();
 
   ASSERT_TRUE(wait_until([&] { return done_count.load(std::memory_order_acquire) == 3; }));
+  scheduler.stop();
   EXPECT_EQ(done_count.load(std::memory_order_acquire), 3);
 }
 
 // 生产者/消费者模式
 TEST(ConditionVariableTest, ProducerConsumer) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
+
   AsyncMutex mtx;
   ConditionVariable cv;
   int value = 0;
@@ -92,17 +100,20 @@ TEST(ConditionVariableTest, ProducerConsumer) {
     co_return;
   };
 
-  scheduler.spawn(consumer());
+  scheduler.submit(consumer());
   ASSERT_TRUE(wait_until([&] { return consumer_ready.load(std::memory_order_acquire); }));
-  scheduler.spawn(producer(123));
+  scheduler.submit(producer(123));
 
   ASSERT_TRUE(wait_until([&] { return consumed.load(std::memory_order_acquire) == 123; }));
+  scheduler.stop();
   EXPECT_EQ(consumed.load(std::memory_order_acquire), 123);
 }
 
 // wait 返回后仍应持有 mutex，直到 guard 析构
 TEST(ConditionVariableTest, WaitReacquiresLockBeforeReturning) {
-  Scheduler scheduler(3);
+  runtime::Scheduler scheduler;
+  scheduler.init(3);
+
   AsyncMutex mtx;
   ConditionVariable cv;
 
@@ -146,9 +157,9 @@ TEST(ConditionVariableTest, WaitReacquiresLockBeforeReturning) {
     co_return;
   };
 
-  scheduler.spawn(waiter());
-  scheduler.spawn(competitor());
-  scheduler.spawn(notifier());
+  scheduler.submit(waiter());
+  scheduler.submit(competitor());
+  scheduler.submit(notifier());
 
   ASSERT_TRUE(wait_until([&] {
     return waiter_holding_after_wait.load(std::memory_order_acquire);
@@ -159,4 +170,5 @@ TEST(ConditionVariableTest, WaitReacquiresLockBeforeReturning) {
   ASSERT_TRUE(wait_until([&] {
     return competitor_acquired.load(std::memory_order_acquire);
   }));
+  scheduler.stop();
 }

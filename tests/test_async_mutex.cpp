@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "async_mutex.h"
-#include "scheduler.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 #include "test_utils.h"
 
@@ -27,7 +27,8 @@ TEST(AsyncMutexTest, BasicLockUnlock) {
 
 // 多个协程互斥访问共享变量，结果应等于任务数
 TEST(AsyncMutexTest, MutualExclusion) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
   AsyncMutex mtx;
   std::atomic<int> counter{0};
   const int N = 100;
@@ -39,10 +40,11 @@ TEST(AsyncMutexTest, MutualExclusion) {
   };
 
   for (int i = 0; i < N; i++) {
-    scheduler.spawn(task());
+    scheduler.submit(task());
   }
 
   ASSERT_TRUE(wait_until([&] { return counter.load(std::memory_order_relaxed) == N; }));
+  scheduler.stop();
   EXPECT_EQ(counter.load(std::memory_order_relaxed), N);
 }
 

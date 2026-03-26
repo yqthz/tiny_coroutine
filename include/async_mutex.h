@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime/resume_handle.h"
+
 #include <coroutine>
 #include <mutex>
 #include <queue>
@@ -106,7 +108,7 @@ public:
       auto handle = wait_queue_.front();
       wait_queue_.pop();
       lock.unlock();
-      handle.resume();
+      runtime::reschedule_or_resume(handle);
     } else {
       lock_ = false;
     }

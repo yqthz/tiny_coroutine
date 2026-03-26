@@ -22,10 +22,10 @@ endif()
 
 include_directories(include)           # 公共头文件目录
 set(TINY_COROUTINE_CORE_SOURCES
-  src/async_io.cpp
   src/runtime/scheduler.cpp
   src/runtime/context.cpp
   src/runtime/engine.cpp
+  src/runtime/resume_handle.cpp
 )
 
 # 查找 liburing

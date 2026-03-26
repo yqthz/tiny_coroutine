@@ -1,4 +1,5 @@
-#include "io_context.h"
+#include "runtime/io_awaiter.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 
 #include <benchmark/benchmark.h>
@@ -48,13 +49,13 @@ struct TempFile {
   }
 };
 
-Task<void> ioWriteWorker(IoContext &ctx, int fd, const void *buf,
-                         std::size_t block_size, int ops, std::size_t offset,
+Task<void> ioWriteWorker(int fd, const void *buf, std::size_t block_size,
+                         int ops, std::size_t offset,
                          std::atomic<int> &completed,
                          std::atomic<int> &errors) {
   for (int i = 0; i < ops; ++i) {
     const auto ret =
-        co_await ctx.async_write(fd, buf, block_size, offset + i * block_size);
+        co_await runtime::io::write(fd, buf, block_size, offset + i * block_size);
     if (ret < 0 || static_cast<std::size_t>(ret) != block_size) {
       errors.fetch_add(1, std::memory_order_relaxed);
       continue;
@@ -64,13 +65,12 @@ Task<void> ioWriteWorker(IoContext &ctx, int fd, const void *buf,
   co_return;
 }
 
-Task<void> ioReadWorker(IoContext &ctx, int fd, void *buf,
-                        std::size_t block_size, int ops, std::size_t offset,
-                        std::atomic<int> &completed,
+Task<void> ioReadWorker(int fd, void *buf, std::size_t block_size, int ops,
+                        std::size_t offset, std::atomic<int> &completed,
                         std::atomic<int> &errors) {
   for (int i = 0; i < ops; ++i) {
     const auto ret =
-        co_await ctx.async_read(fd, buf, block_size, offset + i * block_size);
+        co_await runtime::io::read(fd, buf, block_size, offset + i * block_size);
     if (ret < 0 || static_cast<std::size_t>(ret) != block_size) {
       errors.fetch_add(1, std::memory_order_relaxed);
       continue;
@@ -117,20 +117,20 @@ static void BM_AsyncWriteThroughput(benchmark::State &state) {
 
   for (auto _ : state) {
     TempFile file(total_bytes);
-    IoContext io_ctx(256, static_cast<size_t>(submit_batch_size),
-                     static_cast<size_t>(completion_batch_size));
+    runtime::Scheduler scheduler;
+    scheduler.init(static_cast<size_t>(concurrency));
     std::atomic<int> completed{0};
     std::atomic<int> errors{0};
 
     for (int worker = 0; worker < concurrency; ++worker) {
       const std::size_t base_offset =
           static_cast<std::size_t>(worker) * ops_per_worker * kBlockSize;
-      io_ctx.spawn(ioWriteWorker(io_ctx, file.fd, write_buf.data(), kBlockSize,
-                                 ops_per_worker, base_offset, completed,
-                                 errors));
+      scheduler.submit(ioWriteWorker(file.fd, write_buf.data(), kBlockSize,
+                                     ops_per_worker, base_offset, completed,
+                                     errors));
     }
 
-    io_ctx.run();
+    scheduler.loop();
 
     if (completed.load(std::memory_order_acquire) != total_ops ||
         errors.load(std::memory_order_acquire) != 0) {
@@ -171,20 +171,20 @@ static void BM_AsyncReadThroughput(benchmark::State &state) {
 
   for (auto _ : state) {
     TempFile file(total_bytes);
-    IoContext io_ctx(256, static_cast<size_t>(submit_batch_size),
-                     static_cast<size_t>(completion_batch_size));
+    runtime::Scheduler scheduler;
+    scheduler.init(static_cast<size_t>(concurrency));
     std::atomic<int> completed{0};
     std::atomic<int> errors{0};
 
     for (int worker = 0; worker < concurrency; ++worker) {
       const std::size_t base_offset =
           static_cast<std::size_t>(worker) * ops_per_worker * kBlockSize;
-      io_ctx.spawn(ioReadWorker(io_ctx, file.fd, read_buffers[worker].data(),
-                                kBlockSize, ops_per_worker, base_offset,
-                                completed, errors));
+      scheduler.submit(ioReadWorker(file.fd, read_buffers[worker].data(),
+                                    kBlockSize, ops_per_worker, base_offset,
+                                    completed, errors));
     }
 
-    io_ctx.run();
+    scheduler.loop();
 
     if (completed.load(std::memory_order_acquire) != total_ops ||
         errors.load(std::memory_order_acquire) != 0) {

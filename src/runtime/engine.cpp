@@ -15,10 +15,6 @@ void Engine::submit_task(std::coroutine_handle<> handle) {
 }
 
 void Engine::submit_io_waiting(std::coroutine_handle<> handle) {
-  if (handle == std::coroutine_handle<>()) {
-    return;
-  }
-
   on_io_inflight_begin();
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -72,7 +68,7 @@ size_t Engine::pop_batch(std::vector<std::coroutine_handle<>> &out,
   }
 
   out.clear();
-  while (out.size() < max_n && task_queue_.empty() == false) {
+  while (out.size() < max_n && !task_queue_.empty()) {
     out.push_back(task_queue_.front());
     task_queue_.pop();
   }
@@ -80,6 +76,7 @@ size_t Engine::pop_batch(std::vector<std::coroutine_handle<>> &out,
   return out.size();
 }
 
+// 提交 IO 操作
 size_t Engine::poll_io(size_t max_n) {
   if (max_n == 0) {
     return 0;
@@ -90,27 +87,30 @@ size_t Engine::poll_io(size_t max_n) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    while (progressed < max_n && io_waiting_queue_.empty() == false) {
+    while (progressed < max_n && !io_waiting_queue_.empty()) {
       task_queue_.push(io_waiting_queue_.front());
       io_waiting_queue_.pop();
+      // 减少正在执行的 IO 操作计数
       on_io_inflight_end();
       ++progressed;
     }
 
     size_t prepared = 0;
-    while (prepared < max_n && io_read_submit_queue_.empty() == false) {
+    while (prepared < max_n && !io_read_submit_queue_.empty()) {
       auto *awaiter = io_read_submit_queue_.front();
       io_read_submit_queue_.pop();
 
+      // 提交读 IO 操作
       uring_.submit_read(awaiter->fd(), awaiter->buf(), awaiter->len(),
                          awaiter->offset(),
                          reinterpret_cast<uint64_t>(awaiter));
 
+      // 增加待提交的 IO 操作计数
       ++pending_submit_count_;
       ++prepared;
     }
 
-    while (prepared < max_n && io_write_submit_queue_.empty() == false) {
+    while (prepared < max_n && !io_write_submit_queue_.empty()) {
       auto *awaiter = io_write_submit_queue_.front();
       io_write_submit_queue_.pop();
 
@@ -212,7 +212,8 @@ void Engine::wait_for_work_or_stop(std::stop_token token) {
     return token.stop_requested() || task_queue_.empty() == false ||
            io_waiting_queue_.empty() == false ||
            io_read_submit_queue_.empty() == false ||
-           io_write_submit_queue_.empty() == false || pending_submit_count_ != 0 ||
+           io_write_submit_queue_.empty() == false ||
+           pending_submit_count_ != 0 ||
            inflight_io_.load(std::memory_order_acquire) != 0;
   });
 }

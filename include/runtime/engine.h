@@ -42,16 +42,16 @@ public:
 private:
   mutable std::mutex mutex_;
   std::condition_variable cv_;
-  std::queue<std::coroutine_handle<>> task_queue_;
-  std::queue<std::coroutine_handle<>> io_waiting_queue_;
-  std::queue<IoReadAwaiter *> io_read_submit_queue_;
-  std::queue<IoWriteAwaiter *> io_write_submit_queue_;
+  std::queue<std::coroutine_handle<>> task_queue_; // 待执行的任务队列
+  std::queue<std::coroutine_handle<>> io_waiting_queue_; // 待执行的 IO 操作队列
+  std::queue<IoReadAwaiter *> io_read_submit_queue_; // 待提交的读 IO 操作队列
+  std::queue<IoWriteAwaiter *> io_write_submit_queue_; // 待提交的写 IO 操作队列
 
   IoUring uring_;
-  size_t pending_submit_count_{0};
+  size_t pending_submit_count_{0}; // 待提交的 IO 操作数
 
-  std::atomic<size_t> inflight_tasks_{0};
-  std::atomic<size_t> inflight_io_{0};
+  std::atomic<size_t> inflight_tasks_{0}; // 正在执行的任务数
+  std::atomic<size_t> inflight_io_{0};    // 正在执行的 IO 操作数
 };
 
 } // namespace tiny_coroutine::runtime

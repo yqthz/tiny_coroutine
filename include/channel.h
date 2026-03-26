@@ -1,5 +1,7 @@
 #pragma once
 
+#include "runtime/resume_handle.h"
+
 #include <atomic>
 #include <coroutine>
 #include <cstdint>
@@ -89,7 +91,7 @@ public:
       }
 
       if (resume_receiver) {
-        resume_receiver.resume();
+        runtime::reschedule_or_resume(resume_receiver);
       }
 
       return suspend_sender;
@@ -158,7 +160,7 @@ public:
       }
 
       if (resume_sender) {
-        resume_sender.resume();
+        runtime::reschedule_or_resume(resume_sender);
       }
 
       return suspend_receiver;
@@ -228,7 +230,7 @@ public:
     }
 
     if (resume_receiver) {
-      resume_receiver.resume();
+      runtime::reschedule_or_resume(resume_receiver);
     }
     return true;
   }
@@ -275,7 +277,7 @@ public:
     }
 
     for (auto handle : resume_receivers) {
-      handle.resume();
+      runtime::reschedule_or_resume(handle);
     }
     return sent;
   }
@@ -325,7 +327,7 @@ public:
     }
 
     if (resume_sender) {
-      resume_sender.resume();
+      runtime::reschedule_or_resume(resume_sender);
     }
     return value;
   }
@@ -390,7 +392,7 @@ public:
     }
 
     for (auto handle : resume_senders) {
-      handle.resume();
+      runtime::reschedule_or_resume(handle);
     }
     return values;
   }
@@ -427,10 +429,10 @@ public:
     lock.unlock();
 
     for (auto handle : sender_handles) {
-      handle.resume();
+      runtime::reschedule_or_resume(handle);
     }
     for (auto handle : receiver_handles) {
-      handle.resume();
+      runtime::reschedule_or_resume(handle);
     }
   }
 

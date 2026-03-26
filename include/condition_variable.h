@@ -1,6 +1,7 @@
 #pragma once
 
 #include "async_mutex.h"
+#include "runtime/resume_handle.h"
 #include "task.h"
 
 #include <coroutine>
@@ -54,7 +55,7 @@ public:
       auto handle = wait_queue_.front();
       wait_queue_.pop();
       lock.unlock();
-      handle.resume();
+      runtime::reschedule_or_resume(handle);
     }
   }
 
@@ -68,7 +69,7 @@ public:
 
     lock.unlock();
     for (auto handle : handles) {
-      handle.resume();
+      runtime::reschedule_or_resume(handle);
     }
   }
 

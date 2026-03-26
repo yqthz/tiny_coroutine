@@ -1,6 +1,6 @@
 #pragma once
 
-#include "scheduler.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 #include "wait_group.h"
 
@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -53,18 +54,16 @@ Task<void> wrapper(std::shared_ptr<TupleState<Ts...>> state) {
 }
 
 template <typename... Ts, size_t... Is>
-std::tuple<Ts...>
-unwrap_tuple_result(std::tuple<std::optional<Ts>...> &res,
-                    std::index_sequence<Is...>) {
+std::tuple<Ts...> unwrap_tuple_result(std::tuple<std::optional<Ts>...> &res,
+                                      std::index_sequence<Is...>) {
   return std::tuple<Ts...>{std::move(*std::get<Is>(res))...};
 }
 
 template <typename... Ts, size_t... Is>
 Task<std::tuple<Ts...>> when_all_impl(std::shared_ptr<TupleState<Ts...>> state,
-                                      Scheduler &scheduler,
                                       std::index_sequence<Is...>) {
 
-  (scheduler.spawn(wrapper<Is>(state)), ...);
+  (runtime::submit_to_scheduler(wrapper<Is>(state)), ...);
 
   co_await state->wg.wait();
 
@@ -78,8 +77,7 @@ Task<std::tuple<Ts...>> when_all_impl(std::shared_ptr<TupleState<Ts...>> state,
 } // namespace detail
 
 template <typename T>
-Task<std::vector<T>> when_all(Scheduler &scheduler,
-                              std::vector<Task<T>> tasks) {
+Task<std::vector<T>> when_all(std::vector<Task<T>> tasks) {
   const size_t n = tasks.size();
   std::shared_ptr<detail::VectorState<T>> state =
       std::make_shared<detail::VectorState<T>>();
@@ -97,7 +95,7 @@ Task<std::vector<T>> when_all(Scheduler &scheduler,
   };
 
   for (size_t i = 0; i < n; i++) {
-    scheduler.spawn(wrapper(i));
+    runtime::submit_to_scheduler(wrapper(i));
   }
 
   co_await state->wg.wait();
@@ -115,15 +113,13 @@ Task<std::vector<T>> when_all(Scheduler &scheduler,
   co_return out;
 }
 
-template <typename... Ts>
-Task<std::tuple<Ts...>> when_all(Scheduler &scheduler, Task<Ts>... tasks) {
+template <typename... Ts> Task<std::tuple<Ts...>> when_all(Task<Ts>... tasks) {
   constexpr int n = static_cast<int>(sizeof...(tasks));
   std::shared_ptr<detail::TupleState<Ts...>> state =
       std::make_shared<detail::TupleState<Ts...>>();
   state->tasks = std::make_tuple(std::move(tasks)...);
   state->wg.add(n);
 
-  return when_all_impl(state, scheduler,
-                       std::make_index_sequence<sizeof...(Ts)>{});
+  return when_all_impl(state, std::make_index_sequence<sizeof...(Ts)>{});
 }
 } // namespace tiny_coroutine

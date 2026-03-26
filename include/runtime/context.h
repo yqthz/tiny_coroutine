@@ -60,11 +60,11 @@ private:
 
   size_t id_{0};
   Scheduler *owner_scheduler_{nullptr};
-  std::atomic<size_t> *pending_tasks_{nullptr};
-  Engine engine_;
-  std::jthread worker_;
-  OnTaskCompleted on_task_completed_;
-  std::vector<std::coroutine_handle<>> work_batch_;
+  std::atomic<size_t> *pending_tasks_{nullptr}; // 待执行的任务数
+  Engine engine_;                     // 负责管理任务和 IO 操作
+  std::jthread worker_;               // 工作线程
+  OnTaskCompleted on_task_completed_; // task 完成时的回调
+  std::vector<std::coroutine_handle<>> work_batch_; // 待执行的任务列表
 };
 
 inline Context *try_local_context() noexcept { return local_context_ptr; }

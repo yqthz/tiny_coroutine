@@ -1,12 +1,11 @@
 #include "channel.h"
-#include "scheduler.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 
 #include <benchmark/benchmark.h>
 
 #include <atomic>
 #include <cstdint>
-#include <thread>
 
 using namespace tiny_coroutine;
 
@@ -78,13 +77,6 @@ static void BM_ChannelCoroutineMPMC(benchmark::State &state) {
   const int messages_per_producer = static_cast<int>(state.range(1));
   const int total_messages = pairs * messages_per_producer;
 
-  std::uint64_t acc_enqueued = 0;
-  std::uint64_t acc_dequeued = 0;
-  std::uint64_t acc_resumed = 0;
-  std::uint64_t acc_notify_calls = 0;
-  std::uint64_t acc_worker_waits = 0;
-  std::uint64_t acc_worker_wakeups = 0;
-
   std::uint64_t acc_buffer_pushes = 0;
   std::uint64_t acc_buffer_pops = 0;
   std::uint64_t acc_direct_handoffs = 0;
@@ -94,33 +86,30 @@ static void BM_ChannelCoroutineMPMC(benchmark::State &state) {
   std::uint64_t acc_try_receive_empty_returns = 0;
 
   for (auto _ : state) {
-    Scheduler scheduler(static_cast<size_t>(pairs * 2));
+    runtime::Scheduler scheduler;
+    scheduler.init(static_cast<size_t>(pairs * 2));
+
     Channel<int> ch(1024);
     std::atomic<int> produced{0};
     std::atomic<int> consumed{0};
     std::atomic<std::uint64_t> sum{0};
 
-    scheduler.reset_stats();
     ch.reset_stats();
 
     for (int i = 0; i < pairs; i++) {
-      scheduler.spawn(producer(ch, messages_per_producer, produced));
-      scheduler.spawn(consumer(ch, messages_per_producer, consumed, sum));
+      scheduler.submit(producer(ch, messages_per_producer, produced));
+      scheduler.submit(consumer(ch, messages_per_producer, consumed, sum));
     }
 
-    while (consumed.load(std::memory_order_acquire) < total_messages) {
-      std::this_thread::yield();
+    scheduler.loop();
+
+    if (produced.load(std::memory_order_acquire) != total_messages ||
+        consumed.load(std::memory_order_acquire) != total_messages) {
+      state.SkipWithError("channel mpmc completion count mismatch");
+      break;
     }
 
-    const auto sched_stats = scheduler.stats_snapshot();
     const auto chan_stats = ch.stats_snapshot();
-
-    acc_enqueued += sched_stats.enqueued;
-    acc_dequeued += sched_stats.dequeued;
-    acc_resumed += sched_stats.resumed;
-    acc_notify_calls += sched_stats.notify_calls;
-    acc_worker_waits += sched_stats.worker_waits;
-    acc_worker_wakeups += sched_stats.worker_wakeups;
 
     acc_buffer_pushes += chan_stats.buffer_pushes;
     acc_buffer_pops += chan_stats.buffer_pops;
@@ -137,19 +126,7 @@ static void BM_ChannelCoroutineMPMC(benchmark::State &state) {
   const double iters = static_cast<double>(state.iterations());
   state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
                           static_cast<int64_t>(total_messages));
-  state.SetLabel("Scheduler + co_await send/receive");
-  state.counters["sched.enqueued/iter"] =
-      benchmark::Counter(static_cast<double>(acc_enqueued) / iters);
-  state.counters["sched.dequeued/iter"] =
-      benchmark::Counter(static_cast<double>(acc_dequeued) / iters);
-  state.counters["sched.resumed/iter"] =
-      benchmark::Counter(static_cast<double>(acc_resumed) / iters);
-  state.counters["sched.notify/iter"] =
-      benchmark::Counter(static_cast<double>(acc_notify_calls) / iters);
-  state.counters["sched.waits/iter"] =
-      benchmark::Counter(static_cast<double>(acc_worker_waits) / iters);
-  state.counters["sched.wakeups/iter"] =
-      benchmark::Counter(static_cast<double>(acc_worker_wakeups) / iters);
+  state.SetLabel("runtime::Scheduler + co_await send/receive");
 
   state.counters["chan.buffer_push/iter"] =
       benchmark::Counter(static_cast<double>(acc_buffer_pushes) / iters);
@@ -169,24 +146,15 @@ static void BM_ChannelCoroutineMPMC(benchmark::State &state) {
                          iters);
 }
 
-BENCHMARK(BM_ChannelCoroutineMPMC)
-    ->Args({1, 10000})
-    ->Args({2, 10000})
-    ->Args({4, 10000});
+BENCHMARK(BM_ChannelCoroutineMPMC)->Args({1, 10000})->Args({2, 10000})->Args({4, 10000});
 
-static void BM_SchedulerSpawnDrain(benchmark::State &state) {
+static void BM_SchedulerSubmitLoop(benchmark::State &state) {
   const int workers = static_cast<int>(state.range(0));
   const int tasks = static_cast<int>(state.range(1));
 
-  std::uint64_t acc_enqueued = 0;
-  std::uint64_t acc_dequeued = 0;
-  std::uint64_t acc_resumed = 0;
-  std::uint64_t acc_notify_calls = 0;
-  std::uint64_t acc_worker_waits = 0;
-  std::uint64_t acc_worker_wakeups = 0;
-
   for (auto _ : state) {
-    Scheduler scheduler(static_cast<size_t>(workers));
+    runtime::Scheduler scheduler;
+    scheduler.init(static_cast<size_t>(workers));
     std::atomic<int> done{0};
 
     auto make_task = [&done]() -> Task<void> {
@@ -194,43 +162,20 @@ static void BM_SchedulerSpawnDrain(benchmark::State &state) {
       co_return;
     };
 
-    scheduler.reset_stats();
-
     for (int i = 0; i < tasks; ++i) {
-      scheduler.spawn(make_task());
+      scheduler.submit(make_task());
     }
 
-    while (done.load(std::memory_order_acquire) < tasks) {
-      std::this_thread::yield();
-    }
+    scheduler.loop();
 
-    const auto stats = scheduler.stats_snapshot();
-    acc_enqueued += stats.enqueued;
-    acc_dequeued += stats.dequeued;
-    acc_resumed += stats.resumed;
-    acc_notify_calls += stats.notify_calls;
-    acc_worker_waits += stats.worker_waits;
-    acc_worker_wakeups += stats.worker_wakeups;
+    if (done.load(std::memory_order_acquire) != tasks) {
+      state.SkipWithError("scheduler completion count mismatch");
+      break;
+    }
   }
 
-  const double iters = static_cast<double>(state.iterations());
   state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) * tasks);
-  state.SetLabel("Scheduler spawn/drain observability");
-  state.counters["sched.enqueued/iter"] =
-      benchmark::Counter(static_cast<double>(acc_enqueued) / iters);
-  state.counters["sched.dequeued/iter"] =
-      benchmark::Counter(static_cast<double>(acc_dequeued) / iters);
-  state.counters["sched.resumed/iter"] =
-      benchmark::Counter(static_cast<double>(acc_resumed) / iters);
-  state.counters["sched.notify/iter"] =
-      benchmark::Counter(static_cast<double>(acc_notify_calls) / iters);
-  state.counters["sched.waits/iter"] =
-      benchmark::Counter(static_cast<double>(acc_worker_waits) / iters);
-  state.counters["sched.wakeups/iter"] =
-      benchmark::Counter(static_cast<double>(acc_worker_wakeups) / iters);
+  state.SetLabel("runtime::Scheduler submit/loop");
 }
 
-BENCHMARK(BM_SchedulerSpawnDrain)
-    ->Args({1, 10000})
-    ->Args({2, 10000})
-    ->Args({4, 10000});
+BENCHMARK(BM_SchedulerSubmitLoop)->Args({1, 10000})->Args({2, 10000})->Args({4, 10000});

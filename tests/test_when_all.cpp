@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "scheduler.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 #include "test_utils.h"
 #include "when_all.h"
@@ -13,7 +13,9 @@ using namespace tiny_coroutine;
 
 // when_all(vector<Task<T>>) 收集所有结果
 TEST(WhenAllTest, VectorTasks) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
+
   std::atomic<bool> done{false};
   std::vector<int> results;
 
@@ -24,14 +26,18 @@ TEST(WhenAllTest, VectorTasks) {
     for (int i = 1; i <= 5; i++) {
       tasks.push_back(make_task(i));
     }
-    results = co_await when_all(scheduler, std::move(tasks));
-    done.store(true);
+    results = co_await when_all(std::move(tasks));
+    done.store(true, std::memory_order_release);
     co_return;
   };
 
-  scheduler.spawn(driver());
+  scheduler.submit(driver());
 
-  ASSERT_TRUE(wait_until([&] { return done.load(); }));
+  ASSERT_TRUE(wait_until(
+      [&] { return done.load(std::memory_order_acquire); },
+      std::chrono::milliseconds(1000)));
+  scheduler.stop();
+
   ASSERT_EQ(results.size(), 5u);
   for (int i = 0; i < 5; i++) {
     EXPECT_EQ(results[i], (i + 1) * (i + 1));
@@ -40,7 +46,9 @@ TEST(WhenAllTest, VectorTasks) {
 
 // when_all(variadic) 收集异构结果
 TEST(WhenAllTest, VariadicTasks) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
+
   std::atomic<bool> done{false};
   int ri = 0;
   double rd = 0.0;
@@ -49,42 +57,54 @@ TEST(WhenAllTest, VariadicTasks) {
   auto dbl_task = []() -> Task<double> { co_return 3.14; };
 
   auto driver = [&]() -> Task<void> {
-    auto [i, d] = co_await when_all(scheduler, int_task(), dbl_task());
+    auto [i, d] = co_await when_all(int_task(), dbl_task());
     ri = i;
     rd = d;
-    done.store(true);
+    done.store(true, std::memory_order_release);
     co_return;
   };
 
-  scheduler.spawn(driver());
+  scheduler.submit(driver());
 
-  ASSERT_TRUE(wait_until([&] { return done.load(); }));
+  ASSERT_TRUE(wait_until(
+      [&] { return done.load(std::memory_order_acquire); },
+      std::chrono::milliseconds(1000)));
+  scheduler.stop();
+
   EXPECT_EQ(ri, 7);
   EXPECT_DOUBLE_EQ(rd, 3.14);
 }
 
 // 空 vector 立即完成
 TEST(WhenAllTest, EmptyVector) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
+
   std::atomic<bool> done{false};
   std::vector<int> results;
 
   auto driver = [&]() -> Task<void> {
     std::vector<Task<int>> tasks;
-    results = co_await when_all(scheduler, std::move(tasks));
-    done.store(true);
+    results = co_await when_all(std::move(tasks));
+    done.store(true, std::memory_order_release);
     co_return;
   };
 
-  scheduler.spawn(driver());
+  scheduler.submit(driver());
 
-  ASSERT_TRUE(wait_until([&] { return done.load(); }));
+  ASSERT_TRUE(wait_until(
+      [&] { return done.load(std::memory_order_acquire); },
+      std::chrono::milliseconds(1000)));
+  scheduler.stop();
+
   EXPECT_EQ(results.empty(), true);
 }
 
 // 子任务异常时 when_all 不应卡死，应向上传播异常
 TEST(WhenAllTest, VectorTaskExceptionPropagatesWithoutDeadlock) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
+
   std::atomic<bool> done{false};
   std::atomic<bool> got_exception{false};
 
@@ -101,7 +121,7 @@ TEST(WhenAllTest, VectorTaskExceptionPropagatesWithoutDeadlock) {
     tasks.push_back(ok_task());
 
     try {
-      auto values = co_await when_all(scheduler, std::move(tasks));
+      auto values = co_await when_all(std::move(tasks));
       (void)values;
     } catch (const std::runtime_error &) {
       got_exception.store(true, std::memory_order_release);
@@ -111,9 +131,13 @@ TEST(WhenAllTest, VectorTaskExceptionPropagatesWithoutDeadlock) {
     co_return;
   };
 
-  scheduler.spawn(driver());
+  scheduler.submit(driver());
 
-  ASSERT_TRUE(wait_until([&] { return done.load(std::memory_order_acquire); }));
+  ASSERT_TRUE(wait_until(
+      [&] { return done.load(std::memory_order_acquire); },
+      std::chrono::milliseconds(1000)));
+  scheduler.stop();
+
   EXPECT_EQ(got_exception.load(std::memory_order_acquire), true);
 }
 
@@ -141,7 +165,9 @@ struct MoveOnlyNonDefault {
 
 // variadic when_all 不应要求默认构造
 TEST(WhenAllTest, VariadicSupportsMoveOnlyNonDefaultConstructibleType) {
-  Scheduler scheduler(2);
+  runtime::Scheduler scheduler;
+  scheduler.init(2);
+
   std::atomic<bool> done{false};
   int payload = 0;
   int plain = 0;
@@ -152,16 +178,20 @@ TEST(WhenAllTest, VariadicSupportsMoveOnlyNonDefaultConstructibleType) {
   auto int_task = []() -> Task<int> { co_return 7; };
 
   auto driver = [&]() -> Task<void> {
-    auto [m, i] = co_await when_all(scheduler, move_only_task(), int_task());
+    auto [m, i] = co_await when_all(move_only_task(), int_task());
     payload = m.value;
     plain = i;
     done.store(true, std::memory_order_release);
     co_return;
   };
 
-  scheduler.spawn(driver());
+  scheduler.submit(driver());
 
-  ASSERT_TRUE(wait_until([&] { return done.load(std::memory_order_acquire); }));
+  ASSERT_TRUE(wait_until(
+      [&] { return done.load(std::memory_order_acquire); },
+      std::chrono::milliseconds(1000)));
+  scheduler.stop();
+
   EXPECT_EQ(payload, 42);
   EXPECT_EQ(plain, 7);
 }

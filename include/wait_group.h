@@ -1,10 +1,13 @@
 #pragma once
 
+#include "runtime/resume_handle.h"
+
 #include <atomic>
 #include <coroutine>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
+#include <vector>
 
 namespace tiny_coroutine {
 class WaitGroup {
@@ -49,7 +52,7 @@ public:
 
       lock.unlock();
       for (auto handle : handles) {
-        handle.resume();
+        runtime::reschedule_or_resume(handle);
       }
     }
   }

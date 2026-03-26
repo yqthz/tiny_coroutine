@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "scheduler.h"
+#include "runtime/scheduler.h"
 #include "task.h"
 #include "test_utils.h"
 #include "wait_group.h"
@@ -33,7 +33,8 @@ TEST(WaitGroupTest, DoneTooManyThrows) {
 
 // N 个任务各调用一次 done()，waiter 恰好在全部完成后继续
 TEST(WaitGroupTest, WaitForNTasks) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
   WaitGroup wg;
   const int N = 5;
   std::atomic<int> finished{0};
@@ -53,19 +54,21 @@ TEST(WaitGroupTest, WaitForNTasks) {
     co_return;
   };
 
-  scheduler.spawn(waiter());
+  scheduler.submit(waiter());
   for (int i = 0; i < N; i++) {
-    scheduler.spawn(worker());
+    scheduler.submit(worker());
   }
 
   ASSERT_TRUE(wait_until([&] { return finished.load() == N && waiter_resumed.load(); }));
+  scheduler.stop();
   EXPECT_EQ(finished.load(), N);
   EXPECT_TRUE(waiter_resumed.load());
 }
 
 // 多个 waiter 都能被唤醒
 TEST(WaitGroupTest, MultipleWaiters) {
-  Scheduler scheduler(4);
+  runtime::Scheduler scheduler;
+  scheduler.init(4);
   WaitGroup wg;
   wg.add(1);
   std::atomic<int> ready{0};
@@ -78,12 +81,13 @@ TEST(WaitGroupTest, MultipleWaiters) {
     co_return;
   };
 
-  scheduler.spawn(waiter());
-  scheduler.spawn(waiter());
-  scheduler.spawn(waiter());
+  scheduler.submit(waiter());
+  scheduler.submit(waiter());
+  scheduler.submit(waiter());
 
   ASSERT_TRUE(wait_until([&] { return ready.load() == 3; }));
   wg.done();
   ASSERT_TRUE(wait_until([&] { return resumed.load() == 3; }));
+  scheduler.stop();
   EXPECT_EQ(resumed.load(), 3);
 }
