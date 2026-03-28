@@ -13,20 +13,17 @@
 
 namespace tiny_coroutine::runtime {
 
-class Scheduler;
 class Context;
 class IoReadAwaiter;
 class IoWriteAwaiter;
 
-extern thread_local Scheduler *local_scheduler_ptr;
 extern thread_local Context *local_context_ptr;
 
 class Context {
 public:
   using OnTaskCompleted = std::function<void()>;
 
-  Context(size_t id, Scheduler *owner_scheduler,
-          std::atomic<size_t> *pending_tasks,
+  Context(size_t id, std::atomic<size_t> *pending_tasks,
           OnTaskCompleted on_task_completed);
 
   Context(const Context &) = delete;
@@ -59,7 +56,6 @@ private:
   void wait_or_idle(std::stop_token token);
 
   size_t id_{0};
-  Scheduler *owner_scheduler_{nullptr};
   std::atomic<size_t> *pending_tasks_{nullptr}; // 待执行的任务数
   Engine engine_;                     // 负责管理任务和 IO 操作
   std::jthread worker_;               // 工作线程

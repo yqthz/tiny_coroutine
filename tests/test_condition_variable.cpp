@@ -130,14 +130,14 @@ TEST(ConditionVariableTest, WaitReacquiresLockBeforeReturning) {
 
     waiter_holding_after_wait.store(true, std::memory_order_release);
     while (release_waiter.load(std::memory_order_acquire) == false) {
-      co_await scheduler.schedule();
+      co_await runtime::yield();
     }
     co_return;
   };
 
   auto competitor = [&]() -> Task<void> {
     while (waiter_holding_after_wait.load(std::memory_order_acquire) == false) {
-      co_await scheduler.schedule();
+      co_await runtime::yield();
     }
     auto guard = co_await mtx.lock();
     (void)guard;
@@ -147,7 +147,7 @@ TEST(ConditionVariableTest, WaitReacquiresLockBeforeReturning) {
 
   auto notifier = [&]() -> Task<void> {
     while (waiter_ready.load(std::memory_order_acquire) == false) {
-      co_await scheduler.schedule();
+      co_await runtime::yield();
     }
     {
       auto guard = co_await mtx.lock();

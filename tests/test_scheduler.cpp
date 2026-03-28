@@ -28,7 +28,7 @@ TEST(SchedulerTest, SpawnAndRun) {
   EXPECT_EQ(counter.load(), 3);
 }
 
-// co_await scheduler.schedule() 能让出并继续执行
+// co_await runtime::yield() 能让出并继续执行
 TEST(SchedulerTest, ScheduleYield) {
   runtime::Scheduler scheduler;
   scheduler.init(2);
@@ -36,7 +36,7 @@ TEST(SchedulerTest, ScheduleYield) {
 
   auto task = [&]() -> Task<void> {
     steps.fetch_add(1); // step 1
-    co_await scheduler.schedule();
+    co_await runtime::yield();
     steps.fetch_add(1); // step 2
     co_return;
   };

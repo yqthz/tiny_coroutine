@@ -17,26 +17,8 @@
 
 namespace tiny_coroutine::runtime {
 
-class Scheduler;
-extern thread_local Scheduler *local_scheduler_ptr;
-
 class Scheduler {
 public:
-  struct Awaiter {
-    Scheduler *scheduler_{nullptr};
-
-    explicit Awaiter(Scheduler *scheduler) : scheduler_(scheduler) {}
-
-    bool await_ready() noexcept { return false; }
-
-    template <typename Promise>
-    void await_suspend(std::coroutine_handle<Promise> handle) noexcept {
-      scheduler_->reschedule(handle);
-    }
-
-    void await_resume() noexcept {}
-  };
-
   Scheduler() = default;
   ~Scheduler();
 
@@ -51,16 +33,12 @@ public:
 
   void submit(std::coroutine_handle<> handle);
 
-  Awaiter schedule() { return Awaiter(this); }
-
   void loop();
 
   void stop();
 
 private:
   void submit_new(std::coroutine_handle<> handle);
-
-  void reschedule(std::coroutine_handle<> handle);
 
   void on_task_completed();
 
@@ -78,28 +56,44 @@ private:
   bool initialized_{false};
 };
 
-inline Scheduler *try_local_scheduler() noexcept { return local_scheduler_ptr; }
+struct YieldAwaiter {
+  bool missing_context_{false};
 
-inline void submit_to_scheduler(Scheduler &scheduler, Task<void> &&task) {
-  scheduler.submit(std::move(task));
-}
+  bool await_ready() const noexcept { return false; }
 
-inline void submit_to_scheduler(Scheduler &scheduler,
-                                std::coroutine_handle<> handle) {
-  scheduler.submit(handle);
-}
+  template <typename Promise>
+  bool await_suspend(std::coroutine_handle<Promise> handle) noexcept {
+    auto *ctx = try_local_context();
+    if (ctx == nullptr) {
+      missing_context_ = true;
+      return false;
+    }
+
+    ctx->submit_task(handle);
+    return true;
+  }
+
+  void await_resume() const {
+    if (missing_context_) {
+      throw std::logic_error("runtime::yield() requires runtime context");
+    }
+  }
+};
+
+inline YieldAwaiter yield() noexcept { return YieldAwaiter{}; }
 
 inline void submit_to_scheduler(Task<void> &&task) {
   auto handle = task.get_handle();
   task.detach();
 
-  auto *scheduler = try_local_scheduler();
-  if (scheduler == nullptr) {
-    handle.destroy();
+  auto *ctx = try_local_context();
+  if (ctx != nullptr) {
+    ctx->submit_tracked_task(handle);
     return;
   }
 
-  scheduler->submit(handle);
+  handle.destroy();
+  throw std::logic_error("runtime::submit_to_scheduler() requires runtime context");
 }
 
 inline void submit_to_scheduler(std::coroutine_handle<> handle) {
@@ -107,40 +101,14 @@ inline void submit_to_scheduler(std::coroutine_handle<> handle) {
     return;
   }
 
-  auto *scheduler = try_local_scheduler();
-  if (scheduler == nullptr) {
-    handle.destroy();
-    return;
-  }
-
-  scheduler->submit(handle);
-}
-
-inline void submit_to_context(Task<void> &&task) {
-  auto handle = task.get_handle();
-  task.detach();
-
   auto *ctx = try_local_context();
-  if (ctx == nullptr) {
-    handle.destroy();
+  if (ctx != nullptr) {
+    ctx->submit_tracked_task(handle);
     return;
   }
 
-  ctx->submit_tracked_task(handle);
-}
-
-inline void submit_to_context(std::coroutine_handle<> handle) {
-  if (!handle) {
-    return;
-  }
-
-  auto *ctx = try_local_context();
-  if (ctx == nullptr) {
-    handle.destroy();
-    return;
-  }
-
-  ctx->submit_tracked_task(handle);
+  handle.destroy();
+  throw std::logic_error("runtime::submit_to_scheduler() requires runtime context");
 }
 
 } // namespace tiny_coroutine::runtime

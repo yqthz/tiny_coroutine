@@ -4,10 +4,9 @@ namespace tiny_coroutine::runtime {
 
 thread_local Context *local_context_ptr = nullptr;
 
-Context::Context(size_t id, Scheduler *owner_scheduler,
-                 std::atomic<size_t> *pending_tasks,
+Context::Context(size_t id, std::atomic<size_t> *pending_tasks,
                  OnTaskCompleted on_task_completed)
-    : id_(id), owner_scheduler_(owner_scheduler), pending_tasks_(pending_tasks),
+    : id_(id), pending_tasks_(pending_tasks),
       on_task_completed_(std::move(on_task_completed)) {
   work_batch_.reserve(kProcessBatchSize);
 }
@@ -54,7 +53,6 @@ void Context::submit_tracked_task(std::coroutine_handle<> handle) {
 size_t Context::id() const noexcept { return id_; }
 
 void Context::run(std::stop_token token) {
-  local_scheduler_ptr = owner_scheduler_;
   local_context_ptr = this;
 
   while (true) {
@@ -74,7 +72,6 @@ void Context::run(std::stop_token token) {
   }
 
   local_context_ptr = nullptr;
-  local_scheduler_ptr = nullptr;
 }
 
 bool Context::process_work_once() {

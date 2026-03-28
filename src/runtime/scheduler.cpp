@@ -2,8 +2,6 @@
 
 namespace tiny_coroutine::runtime {
 
-thread_local Scheduler *local_scheduler_ptr = nullptr;
-
 Scheduler::~Scheduler() { stop(); }
 
 void Scheduler::init(size_t context_count) {
@@ -16,7 +14,7 @@ void Scheduler::init(size_t context_count) {
   contexts_.reserve(worker_count);
   for (size_t i = 0; i < worker_count; ++i) {
     contexts_.push_back(std::make_unique<Context>(
-        i, this, &pending_tasks_, [this]() noexcept { on_task_completed(); }));
+        i, &pending_tasks_, [this]() noexcept { on_task_completed(); }));
   }
   for (auto &context : contexts_) {
     context->start();
@@ -81,29 +79,6 @@ void Scheduler::submit_new(std::coroutine_handle<> handle) {
       return;
     }
     pending_tasks_.fetch_add(1, std::memory_order_release);
-    target = contexts_[dispatcher_.dispatch()].get();
-  }
-
-  target->submit_task(handle);
-}
-
-void Scheduler::reschedule(std::coroutine_handle<> handle) {
-  if (!handle) {
-    return;
-  }
-
-  if (auto *ctx = try_local_context(); ctx != nullptr) {
-    ctx->submit_task(handle);
-    return;
-  }
-
-  Context *target = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (!initialized_ || !accepting_) {
-      handle.destroy();
-      return;
-    }
     target = contexts_[dispatcher_.dispatch()].get();
   }
 

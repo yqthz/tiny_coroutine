@@ -46,7 +46,7 @@ TEST(RuntimeSchedulerTest, TaskCanSubmitSubTasksInsideCoroutine) {
   auto parent_task = [&]() -> Task<void> {
     scheduler.submit(sub_task());
     scheduler.submit(sub_task());
-    co_await scheduler.schedule();
+    co_await runtime::yield();
     counter.fetch_add(1, std::memory_order_relaxed);
     co_return;
   };
@@ -62,7 +62,7 @@ TEST(RuntimeSchedulerTest, TaskCanSubmitSubTasksInsideCoroutine) {
   EXPECT_EQ(counter.load(std::memory_order_relaxed), expected);
 }
 
-TEST(RuntimeSchedulerTest, SubmitToContextUsesLocalContextPath) {
+TEST(RuntimeSchedulerTest, SubmitToSchedulerUsesLocalContextPath) {
   runtime::Scheduler scheduler;
   scheduler.init(2);
 
@@ -74,9 +74,9 @@ TEST(RuntimeSchedulerTest, SubmitToContextUsesLocalContextPath) {
   };
 
   auto parent_task = [&]() -> Task<void> {
-    runtime::submit_to_context(local_task());
-    runtime::submit_to_context(local_task());
-    co_await scheduler.schedule();
+    runtime::submit_to_scheduler(local_task());
+    runtime::submit_to_scheduler(local_task());
+    co_await runtime::yield();
     counter.fetch_add(1, std::memory_order_relaxed);
     co_return;
   };
@@ -92,7 +92,7 @@ TEST(RuntimeSchedulerTest, SubmitToContextUsesLocalContextPath) {
   EXPECT_EQ(counter.load(std::memory_order_relaxed), expected);
 }
 
-TEST(RuntimeSchedulerTest, SubmitToSchedulerUsesLocalSchedulerPath) {
+TEST(RuntimeSchedulerTest, SubmitToSchedulerInsideCoroutine) {
   runtime::Scheduler scheduler;
   scheduler.init(2);
 
@@ -106,7 +106,7 @@ TEST(RuntimeSchedulerTest, SubmitToSchedulerUsesLocalSchedulerPath) {
   auto parent_task = [&]() -> Task<void> {
     runtime::submit_to_scheduler(sub_task());
     runtime::submit_to_scheduler(sub_task());
-    co_await scheduler.schedule();
+    co_await runtime::yield();
     counter.fetch_add(1, std::memory_order_relaxed);
     co_return;
   };
@@ -120,6 +120,57 @@ TEST(RuntimeSchedulerTest, SubmitToSchedulerUsesLocalSchedulerPath) {
 
   const int expected = kParentCount * 3;
   EXPECT_EQ(counter.load(std::memory_order_relaxed), expected);
+}
+
+TEST(RuntimeSchedulerTest, SubmitToSchedulerWithoutRuntimeContextThrows) {
+  std::atomic<int> destroyed{0};
+
+  struct DestroyMark {
+    std::atomic<int> *destroyed_ptr{nullptr};
+    bool active{true};
+
+    explicit DestroyMark(std::atomic<int> *ptr) : destroyed_ptr(ptr) {}
+
+    DestroyMark(const DestroyMark &) = delete;
+    DestroyMark &operator=(const DestroyMark &) = delete;
+
+    DestroyMark(DestroyMark &&other) noexcept
+        : destroyed_ptr(other.destroyed_ptr), active(other.active) {
+      other.active = false;
+      other.destroyed_ptr = nullptr;
+    }
+
+    DestroyMark &operator=(DestroyMark &&other) noexcept = delete;
+
+    ~DestroyMark() {
+      if (active && destroyed_ptr != nullptr) {
+        destroyed_ptr->fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  };
+
+  auto make_task = [](DestroyMark mark) -> Task<void> {
+    (void)mark;
+    co_return;
+  };
+
+  EXPECT_THROW(runtime::submit_to_scheduler(make_task(DestroyMark{&destroyed})),
+               std::logic_error);
+
+  EXPECT_EQ(destroyed.load(std::memory_order_relaxed), 1);
+}
+
+TEST(RuntimeSchedulerTest, YieldWithoutRuntimeContextThrows) {
+  auto make_task = []() -> Task<void> {
+    co_await runtime::yield();
+    co_return;
+  };
+
+  auto t = make_task();
+  EXPECT_NO_THROW(t.resume());
+
+  EXPECT_TRUE(t.done());
+  EXPECT_THROW((void)t.get(), std::logic_error);
 }
 
 TEST(RuntimeSchedulerTest, IoSuspendOnceResumesViaPollPhase) {
