@@ -89,3 +89,22 @@ if(TINY_COROUTINE_BENCHMARKS)
     target_link_libraries(tiny_coroutine_benchmarks PRIVATE benchmark::benchmark_main ${URING_LIB})
   endif()
 endif()
+
+# ──────────────────────────────────────────────
+# TCP Echo Server (manual performance testing)
+# ──────────────────────────────────────────────
+option(TINY_COROUTINE_TCP_ECHO_SERVER "Build minimal tcpechoserver" ON)
+if(TINY_COROUTINE_TCP_ECHO_SERVER)
+  add_executable(tcpechoserver
+    benchmarks/tcp_echo_server.cpp
+    ${TINY_COROUTINE_CORE_SOURCES}
+  )
+  target_link_libraries(tcpechoserver PRIVATE ${URING_LIB})
+endif()
+
+option(TINY_COROUTINE_TCP_ECHO_STRESS "Build tcp echo stress client" ON)
+if(TINY_COROUTINE_TCP_ECHO_STRESS)
+  add_executable(tcpecho_stress
+    benchmarks/tcp_echo_stress.cpp
+  )
+endif()
