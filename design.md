@@ -1,6 +1,3 @@
-
-
-
 # Scheduler
 ## init
 Scheduler 初始化时会创建 worker_count 个 context, 并传递 pedding_task 和相应的回调, 然后启动所有的 context
@@ -848,4 +845,221 @@ LockGuard 在析构时会释放锁，实现 RAII 机制
       throw std::runtime_error("channel is closed");
     }
   };
+```
+
+## send
+返回一个 SendAwaiter
+```cpp
+  template <typename U>
+  requires std::is_constructible_v<T, U &&> SenderAwaiter send(U &&value) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (close_) {
+      stats_add(stats_closed_failures_, 1);
+      throw std::runtime_error("channel is closed");
+    }
+    return SenderAwaiter{this, std::forward<U>(value)};
+  }
+```
+
+## receiver
+返回 ReceiverAwaiter
+```cpp
+  ReceiverAwaiter receive() noexcept { return ReceiverAwaiter{this}; }
+```
+
+# ConditionVariable
+## Awaiter
+- await_ready 返回 false, 统一在 await_suspend 中进行判断
+- await_suspend 将当前协程放到等待队列中，并调用 guard_->unlock()，挂起
+- await_resume
+```cpp
+  struct Awaiter {
+    ConditionVariable *cv_{nullptr};
+    AsyncMutex::LockGuard *guard_{nullptr};
+
+    Awaiter() = delete;
+    Awaiter(ConditionVariable *cv, AsyncMutex::LockGuard &guard)
+        : cv_(cv), guard_(&guard) {}
+
+    bool await_ready() noexcept { return false; }
+
+    template <typename T>
+    bool await_suspend(std::coroutine_handle<T> handle) noexcept {
+      {
+        std::lock_guard<std::mutex> lock(cv_->mtx_);
+        cv_->wait_queue_.push(handle);
+      }
+      guard_->unlock();
+      return true;
+    }
+
+    void await_resume() noexcept {}
+  };
+```
+
+## wait
+- 带有谓词的 wait 会在 while  循环中对 op 进行判断， 如果条件不满足，挂起，返回后重新获取锁，重新判断
+```cpp
+  template <typename Callable>
+  [[nodiscard]] Task<void> wait(AsyncMutex::LockGuard &guard,
+                                Callable op) noexcept {
+    while (op() == false) {
+      co_await Awaiter{this, guard};
+      co_await guard.relock();
+    }
+  }
+
+  [[nodiscard]] Task<void> wait(AsyncMutex::LockGuard &guard) noexcept {
+    co_await Awaiter{this, guard};
+    co_await guard.relock();
+  }
+```
+
+## notify_one
+从等待队列中获取一个 handle, 直接调度
+```cpp
+  void notify_one() noexcept {
+    std::unique_lock<std::mutex> lock(mtx_);
+    if (wait_queue_.empty() == false) {
+      auto handle = wait_queue_.front();
+      wait_queue_.pop();
+      lock.unlock();
+      runtime::reschedule_or_resume(handle);
+    }
+  }
+```
+
+## notify_all
+重新调度等待队列中所有的 handle
+```cpp
+  void notify_all() noexcept {
+    std::unique_lock<std::mutex> lock(mtx_);
+    std::vector<std::coroutine_handle<>> handles;
+    while (wait_queue_.empty() == false) {
+      handles.push_back(wait_queue_.front());
+      wait_queue_.pop();
+    }
+
+    lock.unlock();
+    for (auto handle : handles) {
+      runtime::reschedule_or_resume(handle);
+    }
+  }
+```
+
+# WaitGroup
+## Awaiter
+- await_ready 根据 count 进行判断
+- await_suspend 再次根据 count 进行判断，然后将当前协程加入到等待队列中
+- await_resume
+```cpp
+  struct Awaiter {
+    WaitGroup *wait_group_;
+    Awaiter() = delete;
+    explicit Awaiter(WaitGroup *wait_group) : wait_group_(wait_group) {}
+
+    bool await_ready() noexcept { return wait_group_->count_ == 0; }
+
+    template <typename T>
+    bool await_suspend(std::coroutine_handle<T> handle) noexcept {
+      std::lock_guard<std::mutex> lock(wait_group_->mtx);
+      if (wait_group_->count_ == 0) {
+        return false;
+      }
+      wait_group_->wait_queue_.push(handle);
+      return true;
+    }
+
+    void await_resume() noexcept {}
+  };
+```
+
+## add
+直接添加 count 计数
+```cpp
+  void add(int n) noexcept {
+    std::lock_guard<std::mutex> lock(mtx);
+    count_ += n;
+  }
+```
+
+## done
+直接减少 count 计数，如果 count 为零，唤醒所有的 handle
+```cpp
+  void done() {
+    std::unique_lock<std::mutex> lock(mtx);
+    if (count_ == 0) {
+      throw std::runtime_error("count is zero");
+    }
+    count_ -= 1;
+    if (count_ == 0) {
+      std::vector<std::coroutine_handle<>> handles;
+      while (!wait_queue_.empty()) {
+        handles.push_back(wait_queue_.front());
+        wait_queue_.pop();
+      }
+
+      lock.unlock();
+      for (auto handle : handles) {
+        runtime::reschedule_or_resume(handle);
+      }
+    }
+  }
+```
+
+## wait
+返回 AWaiter
+```cpp
+  Awaiter wait() { return Awaiter{this}; }
+```
+
+# when_all
+基于 wait_group 实现，协程结束后调用 wg.done()
+```cpp
+template <typename T>
+Task<std::vector<T>> when_all(std::vector<Task<T>> tasks) {
+  const size_t n = tasks.size();
+  std::shared_ptr<detail::VectorState<T>> state =
+      std::make_shared<detail::VectorState<T>>();
+  state->tasks = std::move(tasks);
+  state->res.resize(n);
+  state->wg.add(static_cast<int>(n));
+
+  auto wrapper = [state](size_t i) -> Task<void> {
+    try {
+      state->res[i].emplace(co_await state->tasks[i]);
+    } catch (...) {
+      detail::store_first_exception(*state, std::current_exception());
+    }
+    state->wg.done();
+  };
+
+  for (size_t i = 0; i < n; i++) {
+    runtime::submit_to_scheduler(wrapper(i));
+  }
+
+  co_await state->wg.wait();
+
+  if (state->exception) {
+    std::rethrow_exception(state->exception);
+  }
+
+  std::vector<T> out;
+  out.reserve(n);
+  for (auto &v : state->res) {
+    out.push_back(std::move(*v));
+  }
+
+  co_return out;
+}
+
+template <typename... Ts> Task<std::tuple<Ts...>> when_all(Task<Ts>... tasks) {
+  constexpr int n = static_cast<int>(sizeof...(tasks));
+  std::shared_ptr<detail::TupleState<Ts...>> state =
+      std::make_shared<detail::TupleState<Ts...>>();
+  state->tasks = std::make_tuple(std::move(tasks)...);
+  state->wg.add(n);
+
+  return when_all_impl(state, std::make_index_sequence<sizeof...(Ts)>{});
+}
 ```
